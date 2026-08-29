@@ -4,7 +4,7 @@ frontend/dist/
 backend/.venv/
 backend/data/
 backend/runtime/
-backend/__pycache__/
+**/__pycache__/
 backend/.pytest_cache/
 backend/app/__pycache__/
 .env
