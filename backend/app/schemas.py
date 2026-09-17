@@ -16,6 +16,7 @@ class Demographics(BaseModel):
 
 class ConversationRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
+    session_id: str | None = None
     demographics: Demographics = Field(default_factory=Demographics)
     answers: dict[str, str] = Field(default_factory=dict)
 
@@ -38,18 +39,25 @@ class Recommendation(BaseModel):
     source: Source
 
 
+class ClarificationOption(BaseModel):
+    value: str
+    label: str
+
+
 class ConversationResponse(BaseModel):
     session_id: str
     masked_text: str
     assistant_text: str
     clarifying_question: str | None = None
     clarification_key: str | None = None
+    clarification_options: list[ClarificationOption] = Field(default_factory=list)
     recommendations: list[Recommendation] = Field(default_factory=list)
     staff_handoff: bool = False
 
 
 class SpeechRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
+    voice: str | None = Field(default=None, max_length=80)
 
 
 class SpeechResponse(BaseModel):
@@ -67,6 +75,7 @@ class AvatarJobResponse(BaseModel):
     id: str
     status: Literal["queued", "processing", "ready", "fallback"]
     video_url: str | None = None
+    download_url: str | None = None
 
 
 class SummaryRequest(BaseModel):
@@ -78,6 +87,13 @@ class SummaryResponse(BaseModel):
     token: str
     expires_at: datetime
     public_url: str
+
+
+class SummaryDetailResponse(BaseModel):
+    masked_text: str
+    created_at: datetime
+    recommendation_names: list[str]
+    recommendations: list[Recommendation] = Field(default_factory=list)
 
 
 class LoginRequest(BaseModel):
@@ -101,3 +117,30 @@ class AdminOverview(BaseModel):
     total_sessions: int
     handoff_count: int
     approved_programs: int
+
+
+ReviewStatus = Literal["approved", "needs_review"]
+
+
+class AdminProgramReview(BaseModel):
+    program_id: str
+    name: str
+    plain_name: str
+    category: str
+    review_status: ReviewStatus
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+    note: str | None = None
+    source: Source
+
+
+class ProgramReviewUpdate(BaseModel):
+    review_status: ReviewStatus
+    note: str = Field(default="", max_length=1000)
+
+
+class ProgramReviewHistory(BaseModel):
+    changed_at: datetime
+    changed_by: str
+    review_status: ReviewStatus
+    note: str

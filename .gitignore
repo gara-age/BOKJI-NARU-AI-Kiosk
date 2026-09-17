@@ -4,6 +4,8 @@ frontend/dist/
 backend/.venv/
 backend/data/
 backend/runtime/
+backend/models/*.onnx
+backend/models/*.pkl
 **/__pycache__/
 backend/.pytest_cache/
 backend/app/__pycache__/
