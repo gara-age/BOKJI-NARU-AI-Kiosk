@@ -117,6 +117,7 @@ class AdminOverview(BaseModel):
     total_sessions: int
     handoff_count: int
     approved_programs: int
+    needs_review_programs: int
 
 
 ReviewStatus = Literal["approved", "needs_review"]
@@ -131,6 +132,7 @@ class AdminProgramReview(BaseModel):
     reviewed_at: datetime | None = None
     reviewed_by: str | None = None
     note: str | None = None
+    origin: Literal["seed", "public-data"] = "seed"
     source: Source
 
 
@@ -144,3 +146,15 @@ class ProgramReviewHistory(BaseModel):
     changed_by: str
     review_status: ReviewStatus
     note: str
+
+
+class AdminPilotArea(BaseModel):
+    sido: str | None = None
+    sigungu: str | None = None
+    updated_at: datetime | None = None
+    updated_by: str | None = None
+
+
+class PilotAreaUpdate(BaseModel):
+    sido: str | None = Field(default=None, max_length=30)
+    sigungu: str | None = Field(default=None, max_length=30)

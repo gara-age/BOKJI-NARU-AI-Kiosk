@@ -9,23 +9,27 @@ import random
 import shutil
 import subprocess
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import edge_tts
 
 
 DEFAULT_ROOT = Path(r"D:\NaviWakeWord")
-TARGET_PHRASES = ("나루야", "나루야 도와줘", "저기 나루야", "나루야 안내해 줘")
+TARGET_PHRASES = (
+    "나루야", "나루야", "나루야", "나루야 도와줘", "나루야 안내해 줘",
+    "안녕 나루야", "저기 나루야", "나루야 잠깐만", "나루야 도와 줄래",
+)
 NEGATIVE_PHRASES = (
-    "나무야", "하루야", "나리야", "나루", "안녕하세요", "도움이 필요해요",
+    "나무야", "하루야", "나리야", "나루", "나야", "나라야", "나도야",
+    "나루아", "나로야", "나루야야", "안녕하세요", "도움이 필요해요",
     "기초생활 지원이 궁금해요", "주민센터는 어디에 있나요", "신청 서류를 알려 주세요",
     "오늘 날씨가 어떤가요", "직원 상담을 받고 싶어요", "복지 서비스를 찾고 있어요",
 )
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def write_status(path: Path, **values: object) -> None:
@@ -100,6 +104,9 @@ async def generate_group(
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Create a resumable Korean wake-word corpus with Edge TTS.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--model-name", default="naruya")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--status-path", type=Path)
     parser.add_argument("--train-count", type=int, default=400)
     parser.add_argument("--validation-count", type=int, default=100)
     args = parser.parse_args()
@@ -107,9 +114,9 @@ async def main() -> None:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg가 필요합니다. WinGet으로 설치된 ffmpeg 경로를 확인해 주세요.")
 
-    model_dir = args.root / "output" / "naruya"
-    status_path = args.root / "status.json"
-    write_status(status_path, phase="corpus", state="starting", model="naruya", target_phrase="나루야")
+    model_dir = args.output_dir or args.root / "output" / args.model_name
+    status_path = args.status_path or args.root / "status.json"
+    write_status(status_path, phase="corpus", state="starting", model=args.model_name, target_phrase="나루야")
     voices = await korean_voices()
     await generate_group(model_dir / "positive_train", TARGET_PHRASES, args.train_count, voices, status_path, "positive_train")
     await generate_group(model_dir / "negative_train", NEGATIVE_PHRASES, args.train_count, voices, status_path, "negative_train")

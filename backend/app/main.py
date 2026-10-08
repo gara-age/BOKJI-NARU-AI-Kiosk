@@ -13,7 +13,7 @@ from .config import settings
 from .official_info import SeedOfficialInfoProvider, build_official_info_provider
 from .schemas import (AdminOverview, AdminProgramReview, AdminSummary, AvatarJobRequest, AvatarJobResponse,
                       ConversationRequest, ConversationResponse, LoginRequest, LoginResponse,
-                      ProgramReviewHistory, ProgramReviewUpdate, SpeechRequest, SpeechResponse,
+                      AdminPilotArea, PilotAreaUpdate, ProgramReviewHistory, ProgramReviewUpdate, SpeechRequest, SpeechResponse,
                       SummaryDetailResponse, SummaryRequest, SummaryResponse)
 from .services import AvatarService, ConversationService, SpeechService, TranscriptionService, WakeWordService, issue_admin_token
 from .store import Store
@@ -34,6 +34,11 @@ app.mount("/runtime", StaticFiles(directory="./runtime"), name="runtime")
 
 store = Store(settings.database_path)
 provider = build_official_info_provider(settings, store)
+# The kiosk never receives a location picker. A local-service API area is applied
+# only from the persisted administrator setting.
+if hasattr(provider, "set_local_area"):
+    pilot_area = store.get_pilot_area()
+    provider.set_local_area(str(pilot_area["sido"] or "") or None, str(pilot_area["sigungu"] or "") or None)
 conversations = ConversationService(settings, store, provider)
 speech = SpeechService(settings)
 avatars = AvatarService(settings)
@@ -177,7 +182,28 @@ def admin_overview() -> AdminOverview:
         )
         for row in records
     ]
-    return AdminOverview(summaries=summaries, total_sessions=total, handoff_count=handoff, approved_programs=provider.approved_count())
+    programs = provider.admin_programs()
+    return AdminOverview(
+        summaries=summaries, total_sessions=total, handoff_count=handoff,
+        approved_programs=provider.approved_count(),
+        needs_review_programs=sum(item.review_status == "needs_review" for item in programs),
+    )
+
+
+@app.get("/api/admin/pilot-area", response_model=AdminPilotArea, dependencies=[Depends(require_admin)])
+def get_pilot_area() -> AdminPilotArea:
+    return AdminPilotArea(**store.get_pilot_area())
+
+
+@app.put("/api/admin/pilot-area", response_model=AdminPilotArea, dependencies=[Depends(require_admin)])
+def update_pilot_area(request: PilotAreaUpdate) -> AdminPilotArea:
+    # A district without a province is ambiguous for the local welfare API.
+    if request.sigungu and not request.sido:
+        raise HTTPException(status_code=422, detail="시·도 선택 후 시·군·구를 입력해 주세요.")
+    area = store.update_pilot_area(request.sido, request.sigungu, "local-admin")
+    if hasattr(provider, "set_local_area"):
+        provider.set_local_area(area["sido"], area["sigungu"])
+    return AdminPilotArea(**area)
 
 
 @app.get("/api/admin/programs", response_model=list[AdminProgramReview], dependencies=[Depends(require_admin)])

@@ -1,0 +1,29 @@
+model_name: "naruya_v3"
+target_phrase:
+  - "나루야"
+custom_negative_phrases: []
+# Candidate-only model. The current naruya.onnx stays active until validation.
+# 2,500 synthetic training clips plus 500 held-out validation clips.
+# This candidate is evaluated separately and never replaces naruya.onnx automatically.
+n_samples: 2500
+n_samples_val: 500
+tts_batch_size: 1
+augmentation_batch_size: 8
+piper_sample_generator_path: "D:/NaviWakeWord/piper_stub"
+output_dir: "D:/NaviWakeWord/output-v3"
+rir_paths: []
+background_paths: []
+background_paths_duplication_rate: []
+false_positive_validation_data_path: "D:/NaviWakeWord/output-v3/naruya_v3/negative_features_test.npy"
+augmentation_rounds: 3
+feature_data_files:
+  generated_negative: "D:/NaviWakeWord/output-v3/naruya_v3/negative_features_train.npy"
+batch_n_per_class:
+  generated_negative: 128
+  adversarial_negative: 96
+  positive: 96
+model_type: "dnn"
+layer_size: 64
+steps: 10000
+max_negative_weight: 1200
+target_false_positives_per_hour: 0.1

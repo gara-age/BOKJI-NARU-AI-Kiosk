@@ -44,5 +44,7 @@ MuseTalk is installed outside the repository at `D:\MuseTalk`. After completing 
 - MuseTalk adapter: `http://127.0.0.1:8001/health`
 
 The adapter uses `D:\MuseTalk\assets\navi-reference.mp4`, queues only one GPU job at a time, and keeps the static synthetic avatar plus TTS active if video generation is delayed or fails. Generated videos stay in `D:\MuseTalk\navi-output` and are not saved in this repository.
+- 외부 데모 고정 주소: ngrok 계정에서 무료 정적 도메인을 만든 뒤 `.env.ngrok.example`을 `.env.ngrok`으로 복사해 인증 토큰과 도메인을 설정합니다. 이후 루트의 `run-navi-ngrok.cmd`를 실행하면 키오스크만 `https://설정한-도메인`으로 공개됩니다. `.env.ngrok`은 Git에 포함되지 않습니다.
 - Ollama: 별도 PC의 URL을 `OLLAMA_BASE_URL`에 설정하고 `OLLAMA_ENABLED=true`로 활성화합니다.
 - 공공 복지정보: 공공데이터포털에서 [한국사회보장정보원_중앙부처복지서비스](https://www.data.go.kr/data/15090532/openapi.do)를 활용신청한 뒤 발급받은 **디코딩 서비스키**를 `PUBLIC_DATA_API_KEY`에 넣으세요. `PUBLIC_DATA_MODE=auto`에서는 키가 있으면 실시간 중앙부처 복지서비스 목록·상세 정보를 조회하고, 없거나 조회가 실패하면 검토된 시드 정보로만 안전하게 대체합니다. 서버를 재시작한 뒤 `/api/health`의 `public_data` 상태를 확인할 수 있습니다.
+- 공공데이터 품질 벤치마크: 루트의 `run-public-data-benchmark.cmd`를 실행하면 15개 복지 분야에 대해 검색 성공, 분야 관련성, 실시간 API 사용 여부, 출처·확인일, 안내 완결성, 담당자 확인 안전 정책을 검사합니다. 결과는 `backend/runtime/benchmarks`에 JSON과 Markdown으로 저장됩니다. API 키가 없으면 시드 정보 벤치마크를 실시간 결과로 오인하지 않도록 실행을 중단합니다.

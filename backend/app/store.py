@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -34,6 +34,16 @@ class Store:
                 changed_at TEXT NOT NULL, changed_by TEXT NOT NULL,
                 review_status TEXT NOT NULL, note TEXT NOT NULL
             )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS external_program_reviews (
+                program_id TEXT PRIMARY KEY, name TEXT NOT NULL, plain_name TEXT NOT NULL,
+                category TEXT NOT NULL, source_name TEXT NOT NULL, source_url TEXT NOT NULL,
+                source_checked_at TEXT NOT NULL, review_status TEXT NOT NULL,
+                reviewed_at TEXT, reviewed_by TEXT, note TEXT NOT NULL DEFAULT ''
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS admin_settings (
+                setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL, updated_by TEXT NOT NULL
+            )""")
             self._add_column_if_missing(connection, "sessions", "category", "TEXT")
             self._add_column_if_missing(connection, "sessions", "pending_key", "TEXT")
             self._add_column_if_missing(connection, "summaries", "recommendations", "TEXT NOT NULL DEFAULT '[]'")
@@ -59,7 +69,7 @@ class Store:
                 """INSERT INTO sessions
                 (id, created_at, masked_text, age_group, gender, handoff, category, pending_key)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (session_id, datetime.now(UTC).isoformat(), masked_text, age_group, gender, int(handoff), category, pending_key),
+                (session_id, datetime.now(timezone.utc).isoformat(), masked_text, age_group, gender, int(handoff), category, pending_key),
             )
         self.add_turn(session_id, "user", masked_text)
         return session_id
@@ -92,7 +102,7 @@ class Store:
         with self._connection() as connection:
             connection.execute(
                 "INSERT INTO conversation_turns (session_id, created_at, role, masked_text) VALUES (?, ?, ?, ?)",
-                (session_id, datetime.now(UTC).isoformat(), role, masked_text),
+                (session_id, datetime.now(timezone.utc).isoformat(), role, masked_text),
             )
 
     def create_summary(
@@ -100,7 +110,7 @@ class Store:
         recommendations: list[dict[str, object]] | None = None,
     ) -> tuple[str, datetime]:
         token = uuid.uuid4().hex
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         expires_at = now + timedelta(minutes=ttl_minutes)
         with self._connection() as connection:
             connection.execute(
@@ -123,7 +133,7 @@ class Store:
             row = connection.execute("""SELECT summaries.token, summaries.created_at, summaries.expires_at,
                 summaries.program_ids, summaries.recommendations, sessions.masked_text FROM summaries
                 JOIN sessions ON sessions.id = summaries.session_id WHERE summaries.token = ?""", (token,)).fetchone()
-        if row is None or datetime.fromisoformat(str(row["expires_at"])) <= datetime.now(UTC):
+        if row is None or datetime.fromisoformat(str(row["expires_at"])) <= datetime.now(timezone.utc):
             return None
         return dict(row)
 
@@ -133,14 +143,15 @@ class Store:
             handoff = connection.execute("SELECT COUNT(*) FROM sessions WHERE handoff = 1").fetchone()[0]
         return int(total), int(handoff)
 
-    def ensure_program_reviews(self, program_ids: list[str]) -> None:
+    def ensure_program_reviews(self, program_ids: list[str] | list[tuple[str, str, str]]) -> None:
         with self._connection() as connection:
-            for program_id in program_ids:
+            for item in program_ids:
+                program_id, review_status, note = item if isinstance(item, tuple) else (item, "approved", "초기 시드 정보 검토")
                 connection.execute(
                     """INSERT OR IGNORE INTO program_reviews
                     (program_id, review_status, reviewed_at, reviewed_by, note)
-                    VALUES (?, 'approved', ?, 'seed', '초기 시드 정보 검토')""",
-                    (program_id, datetime.now(UTC).isoformat()),
+                    VALUES (?, ?, ?, 'seed', ?)""",
+                    (program_id, review_status, datetime.now(timezone.utc).isoformat(), note),
                 )
 
     def program_reviews(self) -> dict[str, dict[str, object]]:
@@ -148,22 +159,56 @@ class Store:
             rows = connection.execute("SELECT * FROM program_reviews").fetchall()
         return {str(row["program_id"]): dict(row) for row in rows}
 
-    def update_program_review(self, program_id: str, review_status: str, note: str, changed_by: str) -> dict[str, object]:
-        now = datetime.now(UTC).isoformat()
+    def external_program_reviews(self) -> dict[str, dict[str, object]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM external_program_reviews ORDER BY reviewed_at DESC, program_id").fetchall()
+        return {str(row["program_id"]): dict(row) for row in rows}
+
+    def observe_external_program(
+        self, *, program_id: str, name: str, category: str, source_name: str,
+        source_url: str, source_checked_at: str,
+    ) -> dict[str, object]:
+        """Queue a live public-data result for an administrator before it is trusted."""
+        now = datetime.now(timezone.utc).isoformat()
         with self._connection() as connection:
             connection.execute(
-                """INSERT INTO program_reviews (program_id, review_status, reviewed_at, reviewed_by, note)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(program_id) DO UPDATE SET review_status = excluded.review_status,
-                reviewed_at = excluded.reviewed_at, reviewed_by = excluded.reviewed_by, note = excluded.note""",
-                (program_id, review_status, now, changed_by, note),
+                """INSERT INTO external_program_reviews
+                (program_id, name, plain_name, category, source_name, source_url, source_checked_at,
+                review_status, reviewed_at, reviewed_by, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'needs_review', ?, 'public-data', '공공데이터 API에서 새로 확인됨')
+                ON CONFLICT(program_id) DO UPDATE SET name = excluded.name, plain_name = excluded.plain_name,
+                category = excluded.category, source_name = excluded.source_name, source_url = excluded.source_url,
+                source_checked_at = excluded.source_checked_at""",
+                (program_id, name, name, category, source_name, source_url, source_checked_at, now),
             )
+        return self.external_program_reviews()[program_id]
+
+    def update_program_review(self, program_id: str, review_status: str, note: str, changed_by: str) -> dict[str, object]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM external_program_reviews WHERE program_id = ?", (program_id,),
+            ).fetchone()
+            if exists:
+                connection.execute(
+                    """UPDATE external_program_reviews SET review_status = ?, reviewed_at = ?,
+                    reviewed_by = ?, note = ? WHERE program_id = ?""",
+                    (review_status, now, changed_by, note, program_id),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO program_reviews (program_id, review_status, reviewed_at, reviewed_by, note)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(program_id) DO UPDATE SET review_status = excluded.review_status,
+                    reviewed_at = excluded.reviewed_at, reviewed_by = excluded.reviewed_by, note = excluded.note""",
+                    (program_id, review_status, now, changed_by, note),
+                )
             connection.execute(
                 """INSERT INTO program_review_history
                 (program_id, changed_at, changed_by, review_status, note) VALUES (?, ?, ?, ?, ?)""",
                 (program_id, now, changed_by, review_status, note),
             )
-        return self.program_reviews()[program_id]
+        return self.external_program_reviews().get(program_id) or self.program_reviews()[program_id]
 
     def program_review_history(self, program_id: str) -> list[dict[str, object]]:
         with self._connection() as connection:
@@ -172,3 +217,37 @@ class Store:
                 WHERE program_id = ? ORDER BY id DESC""", (program_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def approved_program_count(self) -> int:
+        with self._connection() as connection:
+            seed_count = connection.execute("SELECT COUNT(*) FROM program_reviews WHERE review_status = 'approved'").fetchone()[0]
+            external_count = connection.execute("SELECT COUNT(*) FROM external_program_reviews WHERE review_status = 'approved'").fetchone()[0]
+        return int(seed_count + external_count)
+
+    def get_pilot_area(self) -> dict[str, object]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT setting_value, updated_at, updated_by FROM admin_settings WHERE setting_key = 'pilot_area'",
+            ).fetchone()
+        if row is None:
+            return {"sido": None, "sigungu": None, "updated_at": None, "updated_by": None}
+        value = json.loads(str(row["setting_value"]))
+        return {
+            "sido": value.get("sido") or None,
+            "sigungu": value.get("sigungu") or None,
+            "updated_at": row["updated_at"],
+            "updated_by": row["updated_by"],
+        }
+
+    def update_pilot_area(self, sido: str | None, sigungu: str | None, changed_by: str) -> dict[str, object]:
+        now = datetime.now(timezone.utc).isoformat()
+        value = json.dumps({"sido": (sido or "").strip() or None, "sigungu": (sigungu or "").strip() or None}, ensure_ascii=False)
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO admin_settings (setting_key, setting_value, updated_at, updated_by)
+                VALUES ('pilot_area', ?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value,
+                updated_at = excluded.updated_at, updated_by = excluded.updated_by""",
+                (value, now, changed_by),
+            )
+        return self.get_pilot_area()

@@ -40,6 +40,7 @@ class Settings:
     wake_word_enabled: bool = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
     wake_word_model_path: Path = Path(os.getenv("WAKE_WORD_MODEL_PATH", "./models/naruya.onnx"))
     wake_word_threshold: float = float(os.getenv("WAKE_WORD_THRESHOLD", "0.5"))
+    wake_word_min_rms: float = float(os.getenv("WAKE_WORD_MIN_RMS", "0.008"))
 
 
 settings = Settings()

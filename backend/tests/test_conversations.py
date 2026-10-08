@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from app.config import Settings
 from app.official_info import SeedOfficialInfoProvider
 from app.schemas import ConversationRequest, Demographics
@@ -49,3 +51,27 @@ def test_unknown_request_can_be_narrowed_by_support_option(tmp_path: Path) -> No
         answers={"support_type": "youth"},
     )))
     assert second.clarification_key == "age_group"
+
+
+@pytest.mark.parametrize(("text", "expected_category"), [
+    ("전세 보증금과 임대주택 지원이 궁금해요", "housing"),
+    ("일자리를 찾고 직업훈련을 받고 싶어요", "employment"),
+    ("임신하고 출산 지원을 알아보고 싶어요", "pregnancy"),
+    ("아이 돌봄과 방과후 지원이 필요해요", "child"),
+    ("장학금과 학자금 지원을 받고 싶어요", "education"),
+    ("병원비와 치료비 지원이 필요한데요", "health"),
+    ("우울하고 정신건강 상담을 받고 싶어요", "mental"),
+    ("한부모 가족 양육비 지원이 궁금해요", "family"),
+    ("국가유공자 보훈 지원을 알아보고 싶어요", "veteran"),
+    ("동네 복지관에서 하는 지역 프로그램이 있나요", "local"),
+])
+def test_expanded_categories_are_classified_and_return_safe_seed_guidance(
+    tmp_path: Path, text: str, expected_category: str,
+) -> None:
+    response = asyncio.run(service(tmp_path).respond(
+        ConversationRequest(text=text, demographics=Demographics(age_group="35~64세")),
+    ))
+
+    assert response.recommendations
+    assert response.recommendations[0].program_id.startswith(expected_category)
+    assert response.staff_handoff is True

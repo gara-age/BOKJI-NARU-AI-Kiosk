@@ -22,7 +22,17 @@ KEYWORDS = {
     "emergency": ("긴급", "갑자기", "위기", "실직", "병", "퇴거"),
     "elder": ("어르신", "노인", "돌봄", "부모님", "치매"),
     "disability": ("장애", "활동지원", "활동 지원"),
-    "youth": ("청년", "월세", "주거", "임대", "전세"),
+    "youth": ("청년", "대학생", "취업준비", "청년월세"),
+    "housing": ("주거", "월세", "임대", "전세", "주택", "보증금"),
+    "employment": ("취업", "고용", "직업훈련", "일자리", "자활", "구직"),
+    "pregnancy": ("임신", "출산", "산모", "영아", "첫만남"),
+    "child": ("아동", "청소년", "보육", "돌봄", "방과후"),
+    "education": ("교육", "장학", "학자금", "학습", "등록금"),
+    "health": ("의료비", "건강", "질환", "치료", "병원비"),
+    "mental": ("정신건강", "중독", "자살", "심리", "우울"),
+    "family": ("한부모", "다문화", "가족", "양육비", "이주"),
+    "veteran": ("보훈", "국가유공자", "북한이탈", "제대군인"),
+    "local": ("지역복지", "마을", "복지관", "주민센터 프로그램"),
 }
 
 SUPPORT_OPTIONS = (
@@ -31,6 +41,16 @@ SUPPORT_OPTIONS = (
     ClarificationOption(value="elder", label="어르신 돌봄"),
     ClarificationOption(value="disability", label="장애인 활동 지원"),
     ClarificationOption(value="youth", label="청년 주거·월세"),
+    ClarificationOption(value="housing", label="주거·주택 지원"),
+    ClarificationOption(value="employment", label="취업·자활·직업훈련"),
+    ClarificationOption(value="pregnancy", label="임신·출산 지원"),
+    ClarificationOption(value="child", label="아동·청소년 지원"),
+    ClarificationOption(value="education", label="교육·장학 지원"),
+    ClarificationOption(value="health", label="건강·의료비 지원"),
+    ClarificationOption(value="mental", label="정신건강·중독 지원"),
+    ClarificationOption(value="family", label="한부모·다문화·가족"),
+    ClarificationOption(value="veteran", label="보훈·정착 지원"),
+    ClarificationOption(value="local", label="지역 특화 복지"),
 )
 AGE_OPTIONS = tuple(ClarificationOption(value=value, label=value) for value in ("19세 이하", "20~34세", "35~64세", "65세 이상", "선택하지 않음"))
 
@@ -50,7 +70,8 @@ class OllamaClassifier:
         local = classify_locally(text)
         if not self.settings.ollama_enabled:
             return local
-        prompt = "다음 한국어 민원 문장을 basic, emergency, elder, disability, youth 중 하나로만 분류하세요. 모르면 unknown.\n문장: " + text
+        categories = ", ".join(KEYWORDS)
+        prompt = f"다음 한국어 복지 상담 문장을 {categories} 중 하나로만 분류하세요. 모르면 unknown.\n문장: " + text
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 response = await client.post(
@@ -366,11 +387,19 @@ class WakeWordService:
             "ready": configured and self._model_error is None,
             "model_path": str(self.settings.wake_word_model_path),
             "threshold": self.settings.wake_word_threshold,
+            "min_rms": self.settings.wake_word_min_rms,
             "reason": self._model_error or (None if configured else "WAKE_WORD_ENABLED와 나루야 ONNX 모델 경로를 확인해 주세요."),
         }
 
     def reset(self) -> None:
         self._pending_samples = None
+
+    @staticmethod
+    def _normalized_rms(samples: Any) -> float:
+        import numpy as np
+
+        normalized = samples.astype(np.float32) / np.iinfo(np.int16).max
+        return float(np.sqrt(np.mean(normalized * normalized)))
 
     def detect(self, pcm: bytes) -> float | None:
         if not self.settings.wake_word_enabled or not self.settings.wake_word_model_path.is_file():
@@ -383,6 +412,11 @@ class WakeWordService:
             samples = np.frombuffer(pcm, dtype=np.int16)
             if self._pending_samples is not None:
                 samples = np.concatenate((self._pending_samples, samples))
+            # The custom model can score a silent frame highly. Gate inference by
+            # microphone energy so a new connection cannot activate itself.
+            if self._normalized_rms(samples) < self.settings.wake_word_min_rms:
+                self._pending_samples = None
+                return None
             best_score: float | None = None
             while len(samples) >= self.frame_samples:
                 frame, samples = samples[:self.frame_samples], samples[self.frame_samples:]

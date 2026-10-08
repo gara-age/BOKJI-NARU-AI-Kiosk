@@ -16,6 +16,12 @@ WAKE_WORD_THRESHOLD=0.5
 
 4. 서버를 재시작한 뒤 `GET /api/wake-word/status`에서 `ready: true`인지 확인합니다.
 
+## Candidate training
+
+`backend/scripts/start_naruya_v3_training.cmd` creates a larger `naruya_v3.onnx` candidate under `D:\NaviWakeWord\output-v3` and copies it to `backend/models/naruya_v3.onnx`. It never replaces the active `backend/models/naruya.onnx` automatically.
+
+Before promotion, compare the candidate with the active model using recordings made on the intended kiosk microphone: multiple speakers, 0.5-2 m distance, nearby conversations, announcements, and 30 minutes or more of negative background audio. Promote only after confirming fewer false activations and acceptable missed detections.
+
 ## 현장 검증
 
 긍정 샘플(“나루야”)과 부정 샘플(일상 대화, TV 음성, 비슷한 발음)을 각각 16 kHz·모노·16-bit PCM WAV로 준비합니다. 화자, 거리, 마이크, 주민센터 소음 조건을 다양하게 포함합니다.

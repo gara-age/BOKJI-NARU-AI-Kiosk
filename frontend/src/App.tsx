@@ -22,6 +22,10 @@ const naruAnimations: Record<NaruState, string> = {
   complete: '/naru_complete.json',
 }
 
+const RECORDING_SILENCE_MS = 2_000
+const RECORDING_INITIAL_SILENCE_GRACE_MS = 5_000
+const SPEECH_RMS_THRESHOLD = 0.018
+
 const quickTopics = [
   { title: '기초생활 지원', text: '생활비가 어려워서 기초생활 지원을 알아보고 싶어요.', label: '복지 지원을 찾고 싶어요', Icon: HeartHandshake },
   { title: '긴급복지', text: '갑자기 위기 상황이 생겨 긴급복지 지원을 알아보고 싶어요.', label: '신청 서류가 궁금해요', Icon: FileText },
@@ -63,8 +67,12 @@ function downsampleTo16k(samples: Float32Array, inputSampleRate: number): ArrayB
   return output.buffer
 }
 
-function NaruAnimation({ state }: { state: NaruState }) {
+function NaruAnimationLayer({ state, path, visible, onLoaded }: { state: NaruState; path: string; visible: boolean; onLoaded: (state: NaruState) => void }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const animationRef = useRef<ReturnType<typeof lottie.loadAnimation> | null>(null)
+  const onLoadedRef = useRef(onLoaded)
+
+  useEffect(() => { onLoadedRef.current = onLoaded }, [onLoaded])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -73,13 +81,41 @@ function NaruAnimation({ state }: { state: NaruState }) {
       renderer: 'svg',
       loop: true,
       autoplay: true,
-      path: naruAnimations[state],
+      path,
       rendererSettings: { preserveAspectRatio: 'xMidYMid meet' },
     })
-    return () => animation.destroy()
-  }, [state])
+    animationRef.current = animation
+    const markLoaded = () => onLoadedRef.current(state)
+    animation.addEventListener('DOMLoaded', markLoaded)
+    return () => {
+      animation.removeEventListener('DOMLoaded', markLoaded)
+      animation.destroy()
+    }
+  }, [path, state])
 
-  return <div className="naru-animation" ref={containerRef} role="img" aria-label={`나루 ${state} 상태`} />
+  useEffect(() => {
+    if (visible) animationRef.current?.play()
+    else animationRef.current?.pause()
+  }, [visible])
+
+  return <div className={'naru-animation-layer' + (visible ? ' visible' : '')} ref={containerRef} aria-hidden="true" />
+}
+
+function NaruAnimation({ state }: { state: NaruState }) {
+  const [loadedStates, setLoadedStates] = useState<Set<NaruState>>(() => new Set())
+  const [lastReadyState, setLastReadyState] = useState<NaruState>('idle')
+  const visibleState = loadedStates.has(state) ? state : lastReadyState
+
+  const markLoaded = (loadedState: NaruState) => {
+    setLoadedStates((current) => current.has(loadedState) ? current : new Set(current).add(loadedState))
+    if (loadedState === state) setLastReadyState(loadedState)
+  }
+
+  return <div className="naru-animation" role="img" aria-label={`나루 ${state} 상태`}>
+    {(Object.entries(naruAnimations) as [NaruState, string][]).map(([animationState, path]) => (
+      <NaruAnimationLayer key={animationState} state={animationState} path={path} visible={visibleState === animationState} onLoaded={markLoaded} />
+    ))}
+  </div>
 }
 
 function Kiosk() {
@@ -96,6 +132,7 @@ function Kiosk() {
   const [listening, setListening] = useState(false)
   const [wakeListening, setWakeListening] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [inputError, setInputError] = useState(false)
   const [notice, setNotice] = useState('마이크를 눌러 말씀해 주세요.')
   const [summaryUrl, setSummaryUrl] = useState<string | null>(null)
   const [avatarState, setAvatarState] = useState<NaruState>('idle')
@@ -105,13 +142,24 @@ function Kiosk() {
   const recorderRef = useRef<MediaRecorder | null>(null)
   const recordingStreamRef = useRef<MediaStream | null>(null)
   const recordingTimeoutRef = useRef<number | null>(null)
+  const recordingSilenceTimerRef = useRef<number | null>(null)
+  const recordingAudioContextRef = useRef<AudioContext | null>(null)
+  const recordingSourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const recordingAnalyserRef = useRef<AnalyserNode | null>(null)
+  const recordingStartedAtRef = useRef<number | null>(null)
+  const recordingSilenceStartedAtRef = useRef<number | null>(null)
+  const recordingHeardSpeechRef = useRef(false)
+  const silenceStoppedRecordingRef = useRef(false)
   const wakeStreamRef = useRef<MediaStream | null>(null)
   const wakeSocketRef = useRef<WebSocket | null>(null)
   const wakeContextRef = useRef<AudioContext | null>(null)
   const wakeSourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const wakeProcessorRef = useRef<ScriptProcessorNode | null>(null)
   const wakeSilenceRef = useRef<GainNode | null>(null)
+  const wakeListeningRef = useRef(false)
   const wakeAutoStartedRef = useRef(false)
+  const manualVoiceActionRef = useRef(false)
+  const startWakeWordRef = useRef<((autoStart?: boolean) => Promise<void>) | null>(null)
   const avatarPollingRef = useRef<number | null>(null)
   const avatarRequestRef = useRef<string | null>(null)
 
@@ -119,6 +167,7 @@ function Kiosk() {
     recorderRef.current?.stop()
     recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
     if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)
+    stopRecordingSilenceDetection()
     if (avatarPollingRef.current) window.clearTimeout(avatarPollingRef.current)
     stopWakeWord()
   }, [])
@@ -133,6 +182,63 @@ function Kiosk() {
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [settingsOpen])
+
+  function stopRecordingSilenceDetection() {
+    if (recordingSilenceTimerRef.current) window.clearTimeout(recordingSilenceTimerRef.current)
+    recordingSilenceTimerRef.current = null
+    recordingSourceRef.current?.disconnect()
+    recordingSourceRef.current = null
+    recordingAnalyserRef.current = null
+    void recordingAudioContextRef.current?.close()
+    recordingAudioContextRef.current = null
+    recordingStartedAtRef.current = null
+    recordingSilenceStartedAtRef.current = null
+  }
+
+  function monitorRecordingSilence(stream: MediaStream, recorder: MediaRecorder) {
+    try {
+      const context = new AudioContext()
+      const source = context.createMediaStreamSource(stream)
+      const analyser = context.createAnalyser()
+      analyser.fftSize = 2_048
+      source.connect(analyser)
+      recordingAudioContextRef.current = context
+      recordingSourceRef.current = source
+      recordingAnalyserRef.current = analyser
+      const samples = new Uint8Array(analyser.fftSize)
+      const checkSilence = () => {
+        if (recorder.state !== 'recording') return
+        analyser.getByteTimeDomainData(samples)
+        let sum = 0
+        for (const sample of samples) {
+          const amplitude = (sample - 128) / 128
+          sum += amplitude * amplitude
+        }
+        const rms = Math.sqrt(sum / samples.length)
+        const now = performance.now()
+        const stillInGracePeriod = recordingStartedAtRef.current !== null && now - recordingStartedAtRef.current < RECORDING_INITIAL_SILENCE_GRACE_MS
+        const hasSpeechEnergy = rms >= SPEECH_RMS_THRESHOLD
+        if (hasSpeechEnergy) recordingHeardSpeechRef.current = true
+        if (stillInGracePeriod) {
+          recordingSilenceStartedAtRef.current = null
+        } else if (hasSpeechEnergy) {
+          recordingSilenceStartedAtRef.current = null
+        } else if (recordingSilenceStartedAtRef.current === null) {
+          recordingSilenceStartedAtRef.current = now
+        } else if (now - recordingSilenceStartedAtRef.current >= RECORDING_SILENCE_MS) {
+          silenceStoppedRecordingRef.current = true
+          setNotice(recordingHeardSpeechRef.current ? '말씀이 끝난 것으로 보고 녹음을 마칩니다.' : '2초 동안 말씀이 없어 녹음을 마칩니다.')
+          recorder.stop()
+          return
+        }
+        recordingSilenceTimerRef.current = window.setTimeout(checkSilence, 120)
+      }
+      void context.resume()
+      checkSilence()
+    } catch {
+      // Silence detection is optional; recording continues through the manual control.
+    }
+  }
 
   const stopAvatarPolling = () => {
     avatarRequestRef.current = null
@@ -188,6 +294,7 @@ function Kiosk() {
   }
 
   const transcribeRecording = async (recording: Blob) => {
+    setInputError(false)
     setAvatarState('thinking')
     setNotice('말씀하신 내용을 확인하고 있어요.')
     try {
@@ -201,6 +308,7 @@ function Kiosk() {
       setNotice('말씀하신 내용을 확인해 주세요. 맞으면 이 내용으로 확인을 눌러 주세요.')
       setAvatarState('idle')
     } catch {
+      setInputError(true)
       setNotice('음성을 글자로 바꾸지 못했습니다. 다시 말하거나 직접 입력해 주세요.')
       setInputMode('text')
       setAvatarState('idle')
@@ -220,11 +328,12 @@ function Kiosk() {
     wakeContextRef.current = null
     wakeStreamRef.current?.getTracks().forEach((track) => track.stop())
     wakeStreamRef.current = null
+    wakeListeningRef.current = false
     setWakeListening(false)
   }
 
   async function startWakeWord(autoStart = false) {
-    if (wakeListening) {
+    if (wakeListeningRef.current) {
       if (!autoStart) {
         stopWakeWord()
         setNotice('나루야 감지를 멈췄습니다. 필요하면 다시 켜 주세요.')
@@ -253,6 +362,12 @@ function Kiosk() {
       wakeSilenceRef.current = silence
       wakeSocketRef.current = socket
       socket.onopen = () => {
+        if (wakeSocketRef.current !== socket) return
+        if (manualVoiceActionRef.current) {
+          stopWakeWord()
+          return
+        }
+        wakeListeningRef.current = true
         source.connect(processor)
         processor.connect(silence)
         silence.connect(context.destination)
@@ -265,6 +380,7 @@ function Kiosk() {
         setNotice('"나루야"라고 부르면 음성 상담을 시작합니다.')
       }
       socket.onmessage = (event) => {
+        if (wakeSocketRef.current !== socket) return
         const payload = JSON.parse(String(event.data)) as { type?: string }
         if (payload.type === 'activated') {
           stopWakeWord()
@@ -277,28 +393,37 @@ function Kiosk() {
         }
       }
       socket.onerror = () => {
+        if (wakeSocketRef.current !== socket) return
         stopWakeWord()
         setNotice('나루야 감지 연결에 문제가 있습니다. 말하기 버튼을 이용해 주세요.')
       }
     } catch {
       stopWakeWord()
-      setNotice(autoStart ? '나루야 자동 감지를 시작하려면 마이크 권한을 허용해 주세요. 말하기 버튼도 사용할 수 있습니다.' : '나루야 모델 또는 마이크 권한이 필요합니다. 말하기 버튼을 이용해 주세요.')
+      if (!autoStart || !manualVoiceActionRef.current) {
+        setNotice(autoStart ? '나루야 자동 감지를 시작하려면 마이크 권한을 허용해 주세요. 말하기 버튼도 사용할 수 있습니다.' : '나루야 모델 또는 마이크 권한이 필요합니다. 말하기 버튼을 이용해 주세요.')
+      }
     }
   }
+
+  startWakeWordRef.current = startWakeWord
 
   useEffect(() => {
     if (wakeAutoStartedRef.current) return
     wakeAutoStartedRef.current = true
-    void startWakeWord(true)
+    void startWakeWordRef.current?.(true)
   }, [])
 
   const startListening = async () => {
-    if (wakeListening) stopWakeWord()
+    manualVoiceActionRef.current = true
+    setInputError(false)
+    if (wakeListeningRef.current) stopWakeWord()
     if (recorderRef.current?.state === 'recording') {
       recorderRef.current.stop()
       return
     }
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      manualVoiceActionRef.current = false
+      setInputError(true)
       setNotice('이 기기에서는 마이크 녹음을 사용할 수 없습니다. 직접 입력해 주세요.')
       setInputMode('text')
       return
@@ -307,24 +432,42 @@ function Kiosk() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const chunks: BlobPart[] = []
       const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : undefined })
+      recordingHeardSpeechRef.current = false
+      silenceStoppedRecordingRef.current = false
+      recordingStartedAtRef.current = performance.now()
+      recordingSilenceStartedAtRef.current = null
       recorderRef.current = recorder
       recordingStreamRef.current = stream
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data) }
       recorder.onstop = () => {
+        const silenceWithoutSpeech = silenceStoppedRecordingRef.current && !recordingHeardSpeechRef.current
         if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)
         recordingTimeoutRef.current = null
+        stopRecordingSilenceDetection()
         recorderRef.current = null
+        manualVoiceActionRef.current = false
         recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
         recordingStreamRef.current = null
         setListening(false)
+        if (silenceWithoutSpeech) {
+          setInputError(true)
+          setInputMode('voice')
+          setAvatarState('idle')
+          setNotice('말씀을 듣지 못했어요. 다시 마이크를 누르거나 직접 입력해 주세요.')
+          window.setTimeout(() => void startWakeWord(true), 350)
+          return
+        }
         void transcribeRecording(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
       }
       recorder.start()
+      monitorRecordingSilence(stream, recorder)
       setListening(true)
       setAvatarState('listening')
-      setNotice('말씀을 듣고 있어요. 말씀을 마치면 마이크를 다시 눌러 주세요.')
+      setNotice('말씀을 듣고 있어요. 처음 5초 뒤부터 2초 동안 조용하면 자동으로 녹음을 마칩니다.')
       recordingTimeoutRef.current = window.setTimeout(() => recorder.state === 'recording' && recorder.stop(), 30000)
     } catch {
+      manualVoiceActionRef.current = false
+      setInputError(true)
       setListening(false)
       setAvatarState('idle')
       setNotice('마이크 권한이 필요합니다. 브라우저에서 마이크 사용을 허용하거나 직접 입력해 주세요.')
@@ -385,7 +528,7 @@ function Kiosk() {
     setSummaryUrl(`${window.location.origin}${result.public_url}`)
     setAvatarState('complete')
   }
-  const restart = () => { stopAvatarPolling(); setMessage(''); setInputMode('voice'); setAgeGroup('선택 안 함'); setGender('선택 안 함'); setConversation(null); setSummaryUrl(null); setAvatarJob(null); setAvatarVideoOpen(false); setAvatarState('idle'); setNotice('마이크를 눌러 말씀해 주세요.') }
+  const restart = () => { stopAvatarPolling(); setMessage(''); setInputMode('voice'); setAgeGroup('선택 안 함'); setGender('선택 안 함'); setConversation(null); setSummaryUrl(null); setAvatarJob(null); setAvatarVideoOpen(false); setInputError(false); setAvatarState('idle'); setNotice('마이크를 눌러 말씀해 주세요.') }
   const submitExample = (text: string) => { setMessage(text); void sendConversation(text) }
   const voiceState = listening
     ? { label: '말씀을 듣고 있어요', detail: '말씀을 마치면 마이크를 다시 눌러 주세요.', kind: 'listening' }
@@ -421,14 +564,14 @@ function Kiosk() {
         <button className="kiosk-text-action" type="button" onClick={() => setInputMode(inputMode === 'text' ? 'voice' : 'text')}><span className="kiosk-action-icon"><Keyboard aria-hidden="true" /></span><span><strong>직접 입력하기</strong><small>말하기가 어려우시면<br />글로 입력해 주세요</small></span><ChevronRight aria-hidden="true" /></button>
       </div>
       <p className={'kiosk-wake-status ' + (wakeListening ? 'active' : '')}><ShieldCheck aria-hidden="true" /> {wakeListening ? '“나루야”라고 부르면 음성 상담을 시작할 수 있어요.' : '마이크 버튼을 누르기 전에는 음성을 녹음하지 않습니다.'}</p>
-      {(message || conversation || voiceState.kind !== 'idle') && <section className="kiosk-notice" aria-live="polite"><p>{notice}</p></section>}
+      {(message || conversation || inputError || voiceState.kind !== 'idle') && <section className="kiosk-notice" aria-live="polite"><p>{notice}</p></section>}
       {message && <div className="reference-transcript"><strong>말씀하신 내용</strong><p>{message}</p><button type="button" onClick={() => setInputMode('text')}>수정하기</button><button type="button" onClick={() => void submit()}>이 내용으로 확인</button></div>}
       {inputMode === 'text' && <form className="reference-input kiosk-text-form" onSubmit={submit}><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="도움이 필요한 상황을 적어 주세요." rows={3} /><button type="submit" disabled={loading}>{loading ? '확인 중' : '이 내용으로 확인'}</button></form>}
       <section className="kiosk-examples"><h2><Lightbulb aria-hidden="true" /> 이렇게 말씀해 보세요</h2><div>{[
-        '기초생활수급 신청하려고 왔어요', '여권 만들려면 무엇이 필요한가요?', '장애인 혜택을 알고 싶어요', '주민등록등본은 어디서 발급하나요?',
+        '기초생활수급 신청하려고 왔어요', '전세나 임대주택 지원이 궁금해요', '일자리와 직업훈련을 알아보고 싶어요', '아이 돌봄 지원이 필요해요', '병원비 지원을 받을 수 있나요?', '한부모 가족 지원을 알고 싶어요',
       ].map((example) => <button type="button" key={example} onClick={() => submitExample(example)}>“{example}”</button>)}</div></section>
       {conversation && <section className="reference-results" aria-live="polite">
-          <div className="reference-results-head"><div><span>안내를 준비했어요</span><h2>{conversation.clarifying_question ?? '상담 준비 결과'}</h2></div><button type="button" onClick={restart}>처음으로</button></div>
+          <div className="reference-results-head"><div><span>안내를 준비했어요</span><h2>{conversation.clarifying_question ? '상담 내용을 확인할게요' : '상담 준비 결과'}</h2></div><button type="button" onClick={restart}>처음으로</button></div>
           <div className="reference-results-scroll">
             {conversation.clarifying_question && <section className="reference-clarification"><p>{conversation.assistant_text}</p><h3>{conversation.clarifying_question}</h3><div>{conversation.clarification_options.map((option) => <button type="button" key={option.value} disabled={loading} onClick={() => void answerClarification(option)}>{option.label}</button>)}</div><button className="reference-clarification-text" type="button" onClick={() => setInputMode('text')}>직접 답변 입력하기</button></section>}
             {conversation.recommendations.map((item) => <article key={item.program_id}><span className={'status ' + item.status.replaceAll(' ', '-')}>{item.status}</span><h3>{item.plain_name}</h3><p>{item.guidance}</p><h4>먼저 준비해 주세요</h4><ul>{item.preparation_items.map((value) => <li key={value}>{value}</li>)}</ul><p className="reference-office">상담 장소: {item.office_hint}</p></article>)}
@@ -461,28 +604,39 @@ function Kiosk() {
 }
 
 function Admin() {
-  type AdminProgram = { program_id: string; plain_name: string; category: string; review_status: 'approved' | 'needs_review'; reviewed_at?: string | null; note?: string | null; source: { name: string; checked_at: string } }
+  type AdminProgram = { program_id: string; plain_name: string; category: string; review_status: 'approved' | 'needs_review'; reviewed_at?: string | null; reviewed_by?: string | null; note?: string | null; origin: 'seed' | 'public-data'; source: { name: string; url: string; checked_at: string } }
+  type PilotArea = { sido: string | null; sigungu: string | null; updated_at?: string | null; updated_by?: string | null }
+  type ReviewHistory = { changed_at: string; changed_by: string; review_status: 'approved' | 'needs_review'; note: string }
+  const sidoOptions = ['', '서울특별시', '부산광역시', '대구광역시', '인천광역시', '광주광역시', '대전광역시', '울산광역시', '세종특별자치시', '경기도', '강원특별자치도', '충청북도', '충청남도', '전북특별자치도', '전라남도', '경상북도', '경상남도', '제주특별자치도']
   const [password, setPassword] = useState('')
   const [token, setToken] = useState(sessionStorage.getItem('navi-admin-token') ?? '')
-  const [overview, setOverview] = useState<{ total_sessions: number; handoff_count: number; approved_programs: number; summaries: Array<{ token: string; created_at: string; masked_text: string; recommendation_names: string[] }> } | null>(null)
+  const [overview, setOverview] = useState<{ total_sessions: number; handoff_count: number; approved_programs: number; needs_review_programs: number; summaries: Array<{ token: string; created_at: string; masked_text: string; recommendation_names: string[] }> } | null>(null)
   const [programs, setPrograms] = useState<AdminProgram[]>([])
+  const [pilotArea, setPilotArea] = useState<PilotArea>({ sido: null, sigungu: null })
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'approved' | 'needs_review'>('needs_review')
+  const [history, setHistory] = useState<Record<string, ReviewHistory[]>>({})
+  const [savingArea, setSavingArea] = useState(false)
   const [error, setError] = useState('')
 
   const loadOverview = async (currentToken: string) => {
     const headers = { Authorization: 'Bearer ' + currentToken }
-    const [overviewResponse, programsResponse] = await Promise.all([
+    const [overviewResponse, programsResponse, areaResponse] = await Promise.all([
       fetch(API + '/api/admin/overview', { headers }),
       fetch(API + '/api/admin/programs', { headers }),
+      fetch(API + '/api/admin/pilot-area', { headers }),
     ])
-    if (!overviewResponse.ok || !programsResponse.ok) {
+    if (!overviewResponse.ok || !programsResponse.ok || !areaResponse.ok) {
       setToken('')
       sessionStorage.removeItem('navi-admin-token')
       return
     }
     setOverview(await overviewResponse.json())
     setPrograms(await programsResponse.json())
+    setPilotArea(await areaResponse.json())
   }
 
+  // The authenticated token is the sole trigger for refreshing admin data.
+  // oxlint-disable-next-line react/set-state-in-effect
   useEffect(() => { if (token) void loadOverview(token) }, [token])
 
   const login = async (event: FormEvent) => {
@@ -505,9 +659,31 @@ function Admin() {
     if (response.ok) void loadOverview(token)
   }
 
+  const savePilotArea = async () => {
+    setSavingArea(true)
+    setError('')
+    const response = await fetch(API + '/api/admin/pilot-area', {
+      method: 'PUT', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sido: pilotArea.sido || null, sigungu: pilotArea.sigungu || null }),
+    })
+    setSavingArea(false)
+    if (!response.ok) { setError('지역 설정을 저장하지 못했습니다.'); return }
+    setPilotArea(await response.json())
+  }
+
+  const toggleHistory = async (programId: string) => {
+    if (history[programId]) { setHistory((current) => { const next = { ...current }; delete next[programId]; return next }); return }
+    const response = await fetch(API + '/api/admin/programs/' + programId + '/history', { headers: { Authorization: 'Bearer ' + token } })
+    if (response.ok) {
+      const records = await response.json() as ReviewHistory[]
+      setHistory((current) => ({ ...current, [programId]: records }))
+    }
+  }
+
   if (!token) return <main className="admin-shell"><a className="brand" href="/">NAVI <span>민원 준비 도우미</span></a><form className="login-card" onSubmit={login}><p className="eyebrow">담당자 전용</p><h1>관리자 로그인</h1><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus /></label>{error && <p className="error">{error}</p>}<button className="primary-button">로그인</button></form></main>
 
-  return <main className="admin-shell"><header className="topbar"><a className="brand" href="/">NAVI <span>민원 준비 도우미</span></a><button className="text-button" onClick={() => { sessionStorage.removeItem('navi-admin-token'); setToken('') }}>로그아웃</button></header><section className="admin-content"><p className="eyebrow">담당자 관리자 화면</p><h1>오늘의 상담 준비 현황</h1>{overview && <><div className="metric-row"><div><strong>{overview.total_sessions}</strong><span>상담 세션</span></div><div><strong>{overview.handoff_count}</strong><span>담당자 확인 요청</span></div><div><strong>{overview.approved_programs}</strong><span>승인된 안내 항목</span></div></div><section className="summary-list"><h2>공식 정보 검토</h2>{programs.map((program) => <article className="program-review" key={program.program_id}><div><strong>{program.plain_name}</strong><p>{program.source.name} · 확인일 {program.source.checked_at}</p><small>{program.note || '검토 메모 없음'}</small></div><div><span className={program.review_status === 'approved' ? 'review-approved' : 'review-pending'}>{program.review_status === 'approved' ? '검토 완료' : '검토 필요'}</span><button type="button" onClick={() => void updateReview(program.program_id, program.review_status === 'approved' ? 'needs_review' : 'approved')}>{program.review_status === 'approved' ? '재검토 표시' : '검토 완료 처리'}</button></div></article>)}</section><section className="summary-list"><h2>전달된 상담 요약</h2>{overview.summaries.length === 0 ? <p>아직 전달된 상담 요약이 없습니다.</p> : overview.summaries.map((item) => <article key={item.token}><p>{item.masked_text}</p><strong>{item.recommendation_names.join(', ')}</strong><span>{new Date(item.created_at).toLocaleString('ko-KR')} 생성</span></article>)}</section></>}</section></main>
+  const visiblePrograms = programs.filter((program) => reviewFilter === 'all' || program.review_status === reviewFilter)
+  return <main className="admin-shell"><header className="topbar"><a className="brand" href="/">NAVI <span>민원 준비 도우미</span></a><button className="text-button" onClick={() => { sessionStorage.removeItem('navi-admin-token'); setToken('') }}>로그아웃</button></header><section className="admin-content"><p className="eyebrow">담당자 관리자 화면</p><h1>상담·공식 정보 운영</h1>{error && <p className="error">{error}</p>}{overview && <><div className="metric-row"><div><strong>{overview.total_sessions}</strong><span>상담 세션</span></div><div><strong>{overview.handoff_count}</strong><span>담당자 확인 요청</span></div><div><strong>{overview.approved_programs}</strong><span>검토 완료 항목</span></div><div><strong>{overview.needs_review_programs}</strong><span>검토 대기 항목</span></div></div><section className="summary-list admin-area"><div><p className="eyebrow">지역 복지서비스</p><h2>파일럿 지역 설정</h2><p>이 설정은 지자체 복지서비스 API 조회에만 사용됩니다. 키오스크 이용자는 지역을 선택할 수 없습니다.</p></div><div className="area-fields"><label>시·도<select value={pilotArea.sido ?? ''} onChange={(event) => setPilotArea((area) => ({ ...area, sido: event.target.value || null, sigungu: event.target.value ? area.sigungu : null }))}>{sidoOptions.map((item) => <option key={item} value={item}>{item || '선택 안 함'}</option>)}</select></label><label>시·군·구<input value={pilotArea.sigungu ?? ''} placeholder="예: 성동구" disabled={!pilotArea.sido} onChange={(event) => setPilotArea((area) => ({ ...area, sigungu: event.target.value }))} /></label><button type="button" className="primary-button" disabled={savingArea} onClick={() => void savePilotArea()}>{savingArea ? '저장 중' : '지역 적용'}</button></div>{pilotArea.updated_at && <small>마지막 변경: {new Date(pilotArea.updated_at).toLocaleString('ko-KR')} · {pilotArea.updated_by}</small>}</section><section className="summary-list"><div className="review-heading"><div><h2>공식 정보 검토 대기열</h2><p>공공데이터 API에서 새로 발견한 항목은 검토 전까지 키오스크에 담당자 확인 필요로 표시됩니다.</p></div><label>표시<select value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value as typeof reviewFilter)}><option value="needs_review">검토 필요</option><option value="approved">검토 완료</option><option value="all">전체</option></select></label></div>{visiblePrograms.length === 0 ? <p>이 상태의 안내 항목이 없습니다.</p> : visiblePrograms.map((program) => <article className="program-review" key={program.program_id}><div><strong>{program.plain_name}</strong><p>{program.source.name} · 확인일 {program.source.checked_at} · {program.origin === 'public-data' ? 'API 항목' : '시드 항목'}</p><small>{program.note || '검토 메모 없음'}</small></div><div><span className={program.review_status === 'approved' ? 'review-approved' : 'review-pending'}>{program.review_status === 'approved' ? '검토 완료' : '검토 필요'}</span><button type="button" onClick={() => void toggleHistory(program.program_id)}>{history[program.program_id] ? '이력 닫기' : '검토 이력'}</button><button type="button" onClick={() => void updateReview(program.program_id, program.review_status === 'approved' ? 'needs_review' : 'approved')}>{program.review_status === 'approved' ? '재검토 표시' : '검토 완료 처리'}</button></div>{history[program.program_id] && <ol className="review-history">{history[program.program_id].length === 0 ? <li>변경 이력이 없습니다.</li> : history[program.program_id].map((item, index) => <li key={item.changed_at + index}><strong>{item.review_status === 'approved' ? '검토 완료' : '검토 필요'}</strong> · {new Date(item.changed_at).toLocaleString('ko-KR')} · {item.note || '메모 없음'}</li>)}</ol>}</article>)}</section><section className="summary-list"><h2>전달된 상담 요약</h2>{overview.summaries.length === 0 ? <p>아직 전달된 상담 요약이 없습니다.</p> : overview.summaries.map((item) => <article key={item.token}><p>{item.masked_text}</p><strong>{item.recommendation_names.join(', ')}</strong><span>{new Date(item.created_at).toLocaleString('ko-KR')} 생성</span></article>)}</section></>}</section></main>
 }
 
 function Summary() {

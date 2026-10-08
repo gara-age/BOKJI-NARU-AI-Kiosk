@@ -1,7 +1,10 @@
 /node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 backend/.venv/
+backend/.venv-py310/
 backend/data/
 backend/runtime/
 backend/models/*.onnx
@@ -11,3 +14,5 @@ backend/.pytest_cache/
 backend/app/__pycache__/
 .env
 backend/.env
+.env.ngrok
+tools/ngrok/

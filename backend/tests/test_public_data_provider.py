@@ -40,7 +40,7 @@ def test_public_data_provider_maps_official_detail_to_safe_recommendation() -> N
 
     result = provider.search("basic")
 
-    assert len(result) == 2
+    assert len(result) == 1
     assert result[0].program_id == "public-national-WLF0001"
     assert result[0].source.name == "공공데이터포털 · 복지로"
     assert result[0].preparation_items == ["거주지 주민센터에서 신청합니다."]
@@ -52,6 +52,7 @@ def test_public_data_provider_maps_official_detail_to_safe_recommendation() -> N
         "serviceKey": "test-key", "callTp": "L", "pageNo": 1, "numOfRows": 100,
         "srchKeyCode": "003", "searchWrd": "기초생활",
     }
+    assert not any("LcgvWelfarelist" in str(call["url"]) for call in client.calls)
 
 
 def test_public_data_provider_rejects_a_non_success_api_result_code() -> None:
@@ -60,3 +61,15 @@ def test_public_data_provider_rejects_a_non_success_api_result_code() -> None:
     except ValueError:
         return
     raise AssertionError("A non-success public-data result code must not be treated as an empty result.")
+
+
+def test_public_data_provider_prioritizes_service_name_over_summary_keywords() -> None:
+    provider = PublicDataOfficialInfoProvider("test-key", fallback=SeedOfficialInfoProvider())
+    catalog = [
+        {"servId": "incidental", "servNm": "긴급복지 해산비지원", "servDgst": "기초생활이 어려운 가구"},
+        {"servId": "direct", "servNm": "국민기초생활 보장", "servDgst": "소득이 낮은 가구 지원"},
+    ]
+
+    matches = provider._best_matches(catalog, "basic")
+
+    assert matches[0]["servId"] == "direct"
