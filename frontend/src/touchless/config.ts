@@ -1,0 +1,17 @@
+export const TOUCHLESS_CONFIG = {
+  frameIntervalMs: 40,
+  smoothingMinAlpha: 0.2,
+  smoothingMaxAlpha: 0.65,
+  cursorDeadZonePx: 3,
+  maxCursorStepRatio: 0.07,
+  maxFrameJumpRatio: 0.18,
+  confirmedJumpRadiusRatio: 0.08,
+  acquisitionRadiusRatio: 0.08,
+  pinchStartRatio: 0.35,
+  pinchReleaseRatio: 0.55,
+  hoverDwellMs: 120,
+  pinchTargetTolerancePx: 24,
+  trackingLostMs: 300,
+  mirrorX: true,
+  snapRadiusPx: 0,
+} as const

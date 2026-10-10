@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import lottie from 'lottie-web'
 import { ChevronRight, CircleHelp, Contrast, Download, FileText, HeartHandshake, Headset, Home, Info, Keyboard, Lightbulb, MapPin, Mic, Monitor, Play, ShieldCheck, Smartphone, Type, Volume2, X } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
+import { TouchlessCursor } from './touchless/TouchlessCursor'
 import './App.css'
 
 // A relative API keeps kiosk, QR, and external tunnel traffic on one origin.
@@ -546,10 +547,10 @@ function Kiosk() {
       <a className="reference-brand" href="/"><span className="reference-logo"><WaveMark /></span><span><strong>복지나루</strong><small>말로 물어보는 복지·민원 안내</small></span></a>
       <div className="reference-header-actions">
         <div className="reference-tools">
-          <button className={largeText ? 'active' : ''} type="button" aria-pressed={largeText} onClick={() => setLargeText((value) => !value)}><Type aria-hidden="true" /><span>글자 크게</span></button>
-          <button className={highContrast ? 'active' : ''} type="button" aria-pressed={highContrast} onClick={() => setHighContrast((value) => !value)}><Contrast aria-hidden="true" /><span>고대비</span></button>
-          <button type="button" onClick={() => setSettingsOpen(true)}><Volume2 aria-hidden="true" /><span>음성 설정</span></button>
-          <button type="button" onClick={() => setNotice('마이크를 누르고 필요한 도움을 말씀해 주세요. 말하기가 어려우면 직접 입력하기를 눌러 주세요.')}><CircleHelp aria-hidden="true" /><span>도움말</span></button>
+          <button data-touchless="true" className={largeText ? 'active' : ''} type="button" aria-pressed={largeText} onClick={() => setLargeText((value) => !value)}><Type aria-hidden="true" /><span>글자 크게</span></button>
+          <button data-touchless="true" className={highContrast ? 'active' : ''} type="button" aria-pressed={highContrast} onClick={() => setHighContrast((value) => !value)}><Contrast aria-hidden="true" /><span>고대비</span></button>
+          <button data-touchless="true" type="button" onClick={() => setSettingsOpen(true)}><Volume2 aria-hidden="true" /><span>음성 설정</span></button>
+          <button data-touchless="true" type="button" onClick={() => setNotice('마이크를 누르고 필요한 도움을 말씀해 주세요. 말하기가 어려우면 직접 입력하기를 눌러 주세요.')}><CircleHelp aria-hidden="true" /><span>도움말</span></button>
         </div>
       </div>
     </header>
@@ -558,44 +559,45 @@ function Kiosk() {
       <div className="kiosk-character"><div className="kiosk-character-halo" /><div className={'kiosk-character-animation ' + avatarState}><NaruAnimation state={avatarState} /></div><span>언제든지 말씀해 주세요!</span></div>
     </section>
     <section className="kiosk-action-area">
+      <TouchlessCursor />
       <div className={'kiosk-voice-state ' + voiceState.kind} aria-live="polite"><span>{voiceState.label}</span><small>{voiceState.detail}</small></div>
       <div className="kiosk-input-actions">
-        <button className={'kiosk-mic-action ' + (listening ? 'listening' : '')} type="button" onClick={startListening}><span className="kiosk-action-icon"><Mic aria-hidden="true" /></span><span><strong>{listening ? '말씀 듣는 중' : <>마이크를 눌러<br />말씀해 주세요</>}</strong><small>{listening ? '다시 누르면 녹음이 끝나요' : '누른 뒤 천천히 말씀해 주세요'}</small></span><ChevronRight aria-hidden="true" /></button>
-        <button className="kiosk-text-action" type="button" onClick={() => setInputMode(inputMode === 'text' ? 'voice' : 'text')}><span className="kiosk-action-icon"><Keyboard aria-hidden="true" /></span><span><strong>직접 입력하기</strong><small>말하기가 어려우시면<br />글로 입력해 주세요</small></span><ChevronRight aria-hidden="true" /></button>
+        <button data-touchless="true" className={'kiosk-mic-action ' + (listening ? 'listening' : '')} type="button" onClick={startListening}><span className="kiosk-action-icon"><Mic aria-hidden="true" /></span><span><strong>{listening ? '말씀 듣는 중' : <>마이크를 눌러<br />말씀해 주세요</>}</strong><small>{listening ? '다시 누르면 녹음이 끝나요' : '누른 뒤 천천히 말씀해 주세요'}</small></span><ChevronRight aria-hidden="true" /></button>
+        <button data-touchless="true" className="kiosk-text-action" type="button" onClick={() => setInputMode(inputMode === 'text' ? 'voice' : 'text')}><span className="kiosk-action-icon"><Keyboard aria-hidden="true" /></span><span><strong>직접 입력하기</strong><small>말하기가 어려우시면<br />글로 입력해 주세요</small></span><ChevronRight aria-hidden="true" /></button>
       </div>
       <p className={'kiosk-wake-status ' + (wakeListening ? 'active' : '')}><ShieldCheck aria-hidden="true" /> {wakeListening ? '“나루야”라고 부르면 음성 상담을 시작할 수 있어요.' : '마이크 버튼을 누르기 전에는 음성을 녹음하지 않습니다.'}</p>
       {(message || conversation || inputError || voiceState.kind !== 'idle') && <section className="kiosk-notice" aria-live="polite"><p>{notice}</p></section>}
-      {message && <div className="reference-transcript"><strong>말씀하신 내용</strong><p>{message}</p><button type="button" onClick={() => setInputMode('text')}>수정하기</button><button type="button" onClick={() => void submit()}>이 내용으로 확인</button></div>}
-      {inputMode === 'text' && <form className="reference-input kiosk-text-form" onSubmit={submit}><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="도움이 필요한 상황을 적어 주세요." rows={3} /><button type="submit" disabled={loading}>{loading ? '확인 중' : '이 내용으로 확인'}</button></form>}
+      {message && <div className="reference-transcript"><strong>말씀하신 내용</strong><p>{message}</p><button data-touchless="true" type="button" onClick={() => setInputMode('text')}>수정하기</button><button data-touchless="true" type="button" onClick={() => void submit()}>이 내용으로 확인</button></div>}
+      {inputMode === 'text' && <form className="reference-input kiosk-text-form" onSubmit={submit}><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="도움이 필요한 상황을 적어 주세요." rows={3} /><button data-touchless="true" type="submit" disabled={loading}>{loading ? '확인 중' : '이 내용으로 확인'}</button></form>}
       <section className="kiosk-examples"><h2><Lightbulb aria-hidden="true" /> 이렇게 말씀해 보세요</h2><div>{[
         '기초생활수급 신청하려고 왔어요', '전세나 임대주택 지원이 궁금해요', '일자리와 직업훈련을 알아보고 싶어요', '아이 돌봄 지원이 필요해요', '병원비 지원을 받을 수 있나요?', '한부모 가족 지원을 알고 싶어요',
-      ].map((example) => <button type="button" key={example} onClick={() => submitExample(example)}>“{example}”</button>)}</div></section>
+      ].map((example) => <button data-touchless="true" type="button" key={example} onClick={() => submitExample(example)}>“{example}”</button>)}</div></section>
       {conversation && <section className="reference-results" aria-live="polite">
-          <div className="reference-results-head"><div><span>안내를 준비했어요</span><h2>{conversation.clarifying_question ? '상담 내용을 확인할게요' : '상담 준비 결과'}</h2></div><button type="button" onClick={restart}>처음으로</button></div>
+          <div className="reference-results-head"><div><span>안내를 준비했어요</span><h2>{conversation.clarifying_question ? '상담 내용을 확인할게요' : '상담 준비 결과'}</h2></div><button data-touchless="true" type="button" onClick={restart}>처음으로</button></div>
           <div className="reference-results-scroll">
-            {conversation.clarifying_question && <section className="reference-clarification"><p>{conversation.assistant_text}</p><h3>{conversation.clarifying_question}</h3><div>{conversation.clarification_options.map((option) => <button type="button" key={option.value} disabled={loading} onClick={() => void answerClarification(option)}>{option.label}</button>)}</div><button className="reference-clarification-text" type="button" onClick={() => setInputMode('text')}>직접 답변 입력하기</button></section>}
+            {conversation.clarifying_question && <section className="reference-clarification"><p>{conversation.assistant_text}</p><h3>{conversation.clarifying_question}</h3><div>{conversation.clarification_options.map((option) => <button data-touchless="true" type="button" key={option.value} disabled={loading} onClick={() => void answerClarification(option)}>{option.label}</button>)}</div><button data-touchless="true" className="reference-clarification-text" type="button" onClick={() => setInputMode('text')}>직접 답변 입력하기</button></section>}
             {conversation.recommendations.map((item) => <article key={item.program_id}><span className={'status ' + item.status.replaceAll(' ', '-')}>{item.status}</span><h3>{item.plain_name}</h3><p>{item.guidance}</p><h4>먼저 준비해 주세요</h4><ul>{item.preparation_items.map((value) => <li key={value}>{value}</li>)}</ul><p className="reference-office">상담 장소: {item.office_hint}</p></article>)}
-            {conversation.recommendations.length > 0 && <><aside>실제 대상 여부와 추가 제출 서류는 담당 직원이 최종 확인합니다.</aside><div className="reference-result-actions"><button type="button" onClick={createSummary}>QR로 상담 요약 받기</button><button type="button" onClick={() => window.print()}>준비사항 인쇄하기</button>{avatarJob?.status === 'ready' && avatarJob.video_url && <button type="button" className="avatar-video-button" onClick={() => setAvatarVideoOpen(true)}><Play aria-hidden="true" /> 영상 안내 보기</button>}{avatarJob?.status === 'ready' && avatarJob.download_url && <a className="avatar-download-button" href={avatarJob.download_url} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> 영상 다운로드</a>}</div>{avatarJob && avatarJob.status !== 'ready' && avatarJob.status !== 'fallback' && <p className="avatar-job-status">나루가 안내 영상을 준비하고 있어요. 화면 안내는 계속 이용할 수 있습니다.</p>}{summaryUrl && <div className="reference-qr"><QRCodeSVG value={summaryUrl} size={132} /><p>이 QR을 담당자에게 보여 주세요.</p></div>}</>}
+            {conversation.recommendations.length > 0 && <><aside>실제 대상 여부와 추가 제출 서류는 담당 직원이 최종 확인합니다.</aside><div className="reference-result-actions"><button data-touchless="true" type="button" onClick={createSummary}>QR로 상담 요약 받기</button><button data-touchless="true" type="button" onClick={() => window.print()}>준비사항 인쇄하기</button>{avatarJob?.status === 'ready' && avatarJob.video_url && <button data-touchless="true" type="button" className="avatar-video-button" onClick={() => setAvatarVideoOpen(true)}><Play aria-hidden="true" /> 영상 안내 보기</button>}{avatarJob?.status === 'ready' && avatarJob.download_url && <a className="avatar-download-button" href={avatarJob.download_url} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> 영상 다운로드</a>}</div>{avatarJob && avatarJob.status !== 'ready' && avatarJob.status !== 'fallback' && <p className="avatar-job-status">나루가 안내 영상을 준비하고 있어요. 화면 안내는 계속 이용할 수 있습니다.</p>}{summaryUrl && <div className="reference-qr"><QRCodeSVG value={summaryUrl} size={132} /><p>이 QR을 담당자에게 보여 주세요.</p></div>}</>}
           </div>
         </section>}
     </section>
     <section className="reference-quick-grid">
       <h2>자주 찾는 도움</h2>
-      <div className="kiosk-quick-cards">{quickTopics.slice(0, 4).map(({ title, text, label, Icon }, index) => <button type="button" className={'reference-quick quick-' + index} key={title} onClick={() => submitExample(text)}><Icon className={'reference-quick-icon icon-' + index} aria-hidden="true" /><span><strong>{label}</strong><small>{['나에게 맞는 복지 제도를 찾아드려요.', '필요한 준비사항을 안내해 드려요.', '어디서 신청하는지 알려드려요.', '담당자 상담을 연결해 드려요.'][index]}</small></span><ChevronRight aria-hidden="true" /></button>)}</div>
+      <div className="kiosk-quick-cards">{quickTopics.slice(0, 4).map(({ title, text, label, Icon }, index) => <button data-touchless="true" type="button" className={'reference-quick quick-' + index} key={title} onClick={() => submitExample(text)}><Icon className={'reference-quick-icon icon-' + index} aria-hidden="true" /><span><strong>{label}</strong><small>{['나에게 맞는 복지 제도를 찾아드려요.', '필요한 준비사항을 안내해 드려요.', '어디서 신청하는지 알려드려요.', '담당자 상담을 연결해 드려요.'][index]}</small></span><ChevronRight aria-hidden="true" /></button>)}</div>
     </section>
     <footer className="reference-footer"><Info className="reference-footer-icon" aria-hidden="true" /> 본 안내는 공식 정보를 기반으로 제공되며, 최종 판단은 담당 직원의 확인이 필요합니다.</footer>
     {settingsOpen && <div className="reference-settings-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}>
       <section className="reference-settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
-        <header><div><p>환경설정</p><h2 id="settings-title">음성과 화면을 설정하세요</h2></div><button type="button" className="reference-settings-close" onClick={() => setSettingsOpen(false)} aria-label="환경설정 닫기"><X aria-hidden="true" /></button></header>
+        <header><div><p>환경설정</p><h2 id="settings-title">음성과 화면을 설정하세요</h2></div><button data-touchless="true" type="button" className="reference-settings-close" onClick={() => setSettingsOpen(false)} aria-label="환경설정 닫기"><X aria-hidden="true" /></button></header>
         <label htmlFor="tts-voice">TTS 안내 음성<select id="tts-voice" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)}>{ttsVoiceOptions.map((voice) => <option key={voice.value} value={voice.value}>{voice.label}</option>)}</select></label>
         <div className="reference-layout-settings" role="group" aria-label="화면 배치 선택"><span>화면 배치</span><button className={screenLayout === 'portrait' ? 'active' : ''} type="button" aria-pressed={screenLayout === 'portrait'} onClick={() => setScreenLayout('portrait')}><Smartphone aria-hidden="true" />세로형</button><button className={screenLayout === 'landscape' ? 'active' : ''} type="button" aria-pressed={screenLayout === 'landscape'} onClick={() => setScreenLayout('landscape')}><Monitor aria-hidden="true" />가로형</button></div>
         <p>선택한 음성은 이 기기의 다음 안내부터 적용됩니다.</p>
-        <div className="reference-settings-actions"><button type="button" className="reference-settings-preview" onClick={() => void announce('안녕하세요. 복지나루 AI 안내 도우미 나루입니다. 필요한 도움을 편하게 말씀해 주세요.') }><Volume2 aria-hidden="true" /> 미리 듣기</button><button type="button" className="reference-settings-confirm" onClick={() => setSettingsOpen(false)}>확인</button></div>
+        <div className="reference-settings-actions"><button data-touchless="true" type="button" className="reference-settings-preview" onClick={() => void announce('안녕하세요. 복지나루 AI 안내 도우미 나루입니다. 필요한 도움을 편하게 말씀해 주세요.') }><Volume2 aria-hidden="true" /> 미리 듣기</button><button data-touchless="true" type="button" className="reference-settings-confirm" onClick={() => setSettingsOpen(false)}>확인</button></div>
       </section>
     </div>}
     {avatarVideoOpen && avatarJob?.video_url && <div className="avatar-video-backdrop" role="presentation" onMouseDown={() => setAvatarVideoOpen(false)}>
       <section className="avatar-video-modal" role="dialog" aria-modal="true" aria-label="나루 영상 안내" onMouseDown={(event) => event.stopPropagation()}>
-        <header><div><p>나루 영상 안내</p><h2>안내 내용을 영상으로 들으세요</h2></div><button type="button" onClick={() => setAvatarVideoOpen(false)} aria-label="영상 닫기"><X aria-hidden="true" /></button></header>
+        <header><div><p>나루 영상 안내</p><h2>안내 내용을 영상으로 들으세요</h2></div><button data-touchless="true" type="button" onClick={() => setAvatarVideoOpen(false)} aria-label="영상 닫기"><X aria-hidden="true" /></button></header>
         <video src={avatarJob.video_url} controls autoPlay playsInline onPlay={() => audioRef.current?.pause()} />
         {avatarJob.download_url && <a href={avatarJob.download_url} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> 영상 다운로드</a>}
       </section>
