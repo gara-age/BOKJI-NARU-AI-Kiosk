@@ -81,6 +81,169 @@ test('touch input remains available without camera permission', async ({ page, c
   await expect(page.getByPlaceholder('도움이 필요한 상황을 적어 주세요.')).toBeVisible()
 })
 
+test('adaptive view falls back to MID when the camera is denied', async ({ page, context }) => {
+  await context.clearPermissions()
+  await page.goto('/')
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-mid/)
+  await expect(page.getByText('카메라를 사용할 수 없어 기본 화면을 표시합니다.')).toBeVisible()
+  await page.getByRole('button', { name: /직접 입력하기/ }).click()
+  await expect(page.getByPlaceholder('도움이 필요한 상황을 적어 주세요.')).toBeVisible()
+})
+
+test('debug overlay distinguishes detected and manually applied height', async ({ page, context }) => {
+  await context.clearPermissions()
+  await page.goto('/')
+  await page.getByRole('button', { name: '카메라 디버그 보기' }).click()
+  const panel = page.getByRole('region', { name: '시점 판정 디버그' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('자동 분류가 불가능합니다')
+  await expect(page.getByTestId('vision-detected-level')).toHaveText('MID')
+  await expect(page.getByTestId('vision-applied-level')).toHaveText('MID')
+  await expect(panel).toContainText('카메라를 사용할 수 없습니다')
+  await page.getByRole('button', { name: '음성 설정' }).click()
+  await page.getByLabel('조작 버튼 높이').selectOption('HIGH')
+  await page.getByRole('button', { name: '확인' }).click()
+  await expect(page.getByTestId('vision-detected-level')).toHaveText('MID')
+  await expect(page.getByTestId('vision-applied-level')).toHaveText('HIGH')
+  await expect(panel).toContainText('수동 배치 사용 중')
+  await panel.getByRole('button', { name: '카메라 디버그 닫기' }).click()
+  await expect(panel).toHaveCount(0)
+})
+
+test('manual height override changes layout and AUTO restores it', async ({ page }) => {
+  await page.goto('/')
+  const mic = page.locator('.kiosk-mic-action')
+  const baseline = (await mic.boundingBox())!.y
+  await page.getByRole('button', { name: '음성 설정' }).click()
+  await page.getByLabel('조작 버튼 높이').selectOption('LOW')
+  await page.getByRole('button', { name: '확인' }).click()
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-low/)
+  expect((await mic.boundingBox())!.y).toBeGreaterThan(baseline)
+  await page.getByRole('button', { name: '음성 설정' }).click()
+  await page.getByLabel('조작 버튼 높이').selectOption('HIGH')
+  await page.getByRole('button', { name: '확인' }).click()
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-high/)
+  expect((await mic.boundingBox())!.y).toBeLessThan(baseline)
+  await page.getByRole('button', { name: '음성 설정' }).click()
+  await page.getByLabel('조작 버튼 높이').selectOption('AUTO')
+  await page.getByRole('button', { name: '확인' }).click()
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-mid/)
+})
+
+test('eye height and head pose must agree before changing a borderline LOW layout', async ({ page }) => {
+  test.setTimeout(30_000)
+  await page.addInitScript(() => localStorage.setItem('bokjinaru-face-height-calibration-v1', JSON.stringify({ HIGH: .25, MID: .45, LOW: .65, pitch: { HIGH: 0, MID: 2, LOW: 18 } })))
+  await page.route('**/src/vision/faceCamera.ts*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'text/javascript', body: `
+      export async function startFaceCamera({ onFaces }) {
+        let eyeY = .45;
+        let pitch = 2;
+        const conflict = () => { eyeY = .58; pitch = -10 };
+        const low = () => { eyeY = .58; pitch = 14 };
+        const midConflict = () => { eyeY = .45; pitch = 18 };
+        const mid = () => { eyeY = .45; pitch = 2 };
+        window.addEventListener('test-conflict', conflict);
+        window.addEventListener('test-low', low);
+        window.addEventListener('test-mid-conflict', midConflict);
+        window.addEventListener('test-mid', mid);
+        const timer = setInterval(() => onFaces([{ x: .5, y: eyeY + .05, width: .2, height: .25, eyeY, pitch, confidence: .95 }], performance.now()), 80);
+        return () => { clearInterval(timer); for (const [name, listener] of [['test-conflict', conflict], ['test-low', low], ['test-mid-conflict', midConflict], ['test-mid', mid]]) window.removeEventListener(name, listener) };
+      }
+    ` })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: '카메라 디버그 보기' }).click()
+  await page.waitForTimeout(1400)
+  await page.evaluate(() => window.dispatchEvent(new Event('test-conflict')))
+  await expect(page.getByRole('region', { name: '시점 판정 디버그' })).toContainText('신호 불일치: 현재 배치 유지')
+  await page.waitForTimeout(1000)
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-mid/)
+  await page.evaluate(() => window.dispatchEvent(new Event('test-low')))
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-low/, { timeout: 3000 })
+  await page.evaluate(() => window.dispatchEvent(new Event('test-mid-conflict')))
+  await page.waitForTimeout(1000)
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-low/)
+  await page.evaluate(() => window.dispatchEvent(new Event('test-mid')))
+  await expect(page.locator('.kiosk-home')).toHaveClass(/view-mid/, { timeout: 3000 })
+})
+
+test('handover waits for confirmation and resets only after the eight-second grace period', async ({ page }) => {
+  test.setTimeout(35_000)
+  await page.route('**/src/vision/faceCamera.ts*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'text/javascript', body: `
+      export async function startFaceCamera({ onFaces }) {
+        let x = .22;
+        const moveA = () => { x = .22 };
+        const moveB = () => { x = .8 };
+        const moveC = () => { x = .5 };
+        window.addEventListener('test-user-a', moveA);
+        window.addEventListener('test-user-b', moveB);
+        window.addEventListener('test-user-c', moveC);
+        const timer = setInterval(() => onFaces([{ x, y: .45, width: .2, height: .25, eyeY: .4, confidence: .95 }], performance.now()), 80);
+        return () => { clearInterval(timer); window.removeEventListener('test-user-a', moveA); window.removeEventListener('test-user-b', moveB); window.removeEventListener('test-user-c', moveC) };
+      }
+    ` })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /직접 입력하기/ }).click()
+  await page.getByPlaceholder('도움이 필요한 상황을 적어 주세요.').fill('진행 중인 상담')
+  await page.waitForTimeout(550)
+  await page.evaluate(() => window.dispatchEvent(new Event('test-user-b')))
+  await expect(page.getByRole('alertdialog', { name: '새 사용자 확인' })).toBeVisible()
+  await page.evaluate(() => window.dispatchEvent(new Event('test-user-a')))
+  await expect(page.getByRole('alertdialog', { name: '새 사용자 확인' })).toHaveCount(0)
+  await page.evaluate(() => window.dispatchEvent(new Event('test-user-b')))
+  await expect(page.getByRole('alertdialog', { name: '새 사용자 확인' })).toBeVisible()
+  await page.getByRole('button', { name: '계속 사용' }).click()
+  await expect(page.getByPlaceholder('도움이 필요한 상황을 적어 주세요.')).toHaveValue('진행 중인 상담')
+  await page.evaluate(() => window.dispatchEvent(new Event('test-user-c')))
+  await expect(page.getByRole('alertdialog', { name: '새 사용자 확인' })).toBeVisible()
+  await expect(page.getByPlaceholder('도움이 필요한 상황을 적어 주세요.')).toHaveCount(0, { timeout: 11_000 })
+  await expect(page.getByRole('alertdialog', { name: '새 사용자 확인' })).toHaveCount(0)
+})
+
+test('camera calibration is available only after administrator login', async ({ page }) => {
+  await page.route('**/src/vision/faceCamera.ts*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'text/javascript', body: `
+      export async function startFaceCamera({ onFaces }) {
+        let eyeY = .2;
+        let pitch = 0;
+        const mid = () => { eyeY = .45; pitch = 2 };
+        const low = () => { eyeY = .7; pitch = 16 };
+        window.addEventListener('test-mid', mid);
+        window.addEventListener('test-low', low);
+        const timer = setInterval(() => onFaces([{ x: .5, y: eyeY + .05, width: .2, height: .25, eyeY, pitch, confidence: .95 }], performance.now()), 80);
+        return () => { clearInterval(timer); window.removeEventListener('test-mid', mid); window.removeEventListener('test-low', low) };
+      }
+    ` })
+  })
+  await page.route('**/api/admin/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const data = path.endsWith('/login') ? { token: 'test-admin-token' }
+      : path.endsWith('/overview') ? { total_sessions: 0, handoff_count: 0, approved_programs: 0, needs_review_programs: 0, summaries: [] }
+        : path.endsWith('/programs') ? [] : { sido: null, sigungu: null }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
+  })
+  await page.goto('/admin')
+  await expect(page.getByText('이 기기의 시점 높이 보정')).toHaveCount(0)
+  await page.getByLabel('비밀번호').fill('test-password')
+  await page.getByRole('button', { name: '로그인' }).click()
+  await expect(page.getByText('이 기기의 시점 높이 보정')).toBeVisible()
+  await page.getByRole('button', { name: '카메라 보정 시작' }).click()
+  await expect(page.getByText('얼굴 한 개가 보입니다.', { exact: false })).toBeVisible()
+  await page.waitForTimeout(950)
+  await page.getByRole('button', { name: /높은 시점 측정/ }).click()
+  await page.evaluate(() => window.dispatchEvent(new Event('test-mid')))
+  await page.waitForTimeout(950)
+  await page.getByRole('button', { name: /일반 시점 측정/ }).click()
+  await page.evaluate(() => window.dispatchEvent(new Event('test-low')))
+  await page.waitForTimeout(950)
+  await page.getByRole('button', { name: /낮은 시점 측정/ }).click()
+  await page.getByRole('button', { name: '기준 저장' }).click()
+  await expect(page.getByText('저장된 기준:', { exact: false })).toBeVisible()
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bokjinaru-face-height-calibration-v1') ?? 'null').pitch.LOW)).toBe(16)
+})
+
 test('allowed targets are hit-tested without intercepting touch', async ({ page }) => {
   await page.goto('/')
   await page.locator('.kiosk-text-action').scrollIntoViewIfNeeded()
@@ -133,12 +296,46 @@ test('local hand model initializes with a camera stream', async ({ browserName }
   try {
     const context = await browser.newContext({ permissions: ['camera'] })
     const page = await context.newPage()
+    await page.addInitScript(() => {
+      const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+      Object.assign(window, { __cameraCalls: 0 })
+      navigator.mediaDevices.getUserMedia = async (constraints) => {
+        if (constraints.video) (window as Window & { __cameraCalls: number }).__cameraCalls += 1
+        return original(constraints)
+      }
+    })
     await page.goto('http://127.0.0.1:5173/')
+    await expect(page.locator('.adaptive-vision-status')).toContainText('높이 보정이 없어 기본 화면(MID)을 표시합니다', { timeout: 45_000 })
+    await page.getByRole('button', { name: '카메라 디버그 보기' }).click()
+    const preview = page.getByLabel('실시간 카메라 미리보기')
+    await expect(preview).toBeVisible()
+    await expect.poll(() => preview.evaluate((video) => (video as HTMLVideoElement).videoWidth)).toBeGreaterThan(0)
+    await page.getByRole('button', { name: '카메라 디버그 닫기' }).click()
+    await page.getByRole('button', { name: '카메라 디버그 보기' }).click()
+    await expect(page.getByLabel('실시간 카메라 미리보기')).toBeVisible()
     await page.getByRole('button', { name: '비접촉 손동작 사용하기' }).click()
     await expect(page.getByText('손을 찾고 있어요')).toBeVisible({ timeout: 45_000 })
+    expect(await page.evaluate(() => (window as Window & { __cameraCalls: number }).__cameraCalls)).toBe(1)
     await expect(page.getByRole('alert')).toHaveCount(0)
     await page.getByRole('button', { name: '비접촉 입력 끄기' }).click()
     await expect(page.getByText('손을 찾고 있어요')).toHaveCount(0)
+    await page.route('**/api/admin/**', async (route) => {
+      const path = new URL(route.request().url()).pathname
+      const data = path.endsWith('/login') ? { token: 'test-admin-token' }
+        : path.endsWith('/overview') ? { total_sessions: 0, handoff_count: 0, approved_programs: 0, needs_review_programs: 0, summaries: [] }
+          : path.endsWith('/programs') ? [] : { sido: null, sigungu: null }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
+    })
+    await page.goto('http://127.0.0.1:5173/admin')
+    await page.getByLabel('비밀번호').fill('test-password')
+    await page.getByRole('button', { name: '로그인' }).click()
+    await page.getByRole('button', { name: '카메라 보정 시작' }).click()
+    const calibrationPreview = page.getByLabel('관리자 시점 보정 카메라')
+    await expect(calibrationPreview).toBeVisible()
+    await expect.poll(() => calibrationPreview.evaluate((video) => (video as HTMLVideoElement).videoWidth)).toBeGreaterThan(0)
+    expect(await page.evaluate(() => (window as Window & { __cameraCalls: number }).__cameraCalls)).toBe(1)
+    await page.getByRole('button', { name: '취소' }).click()
+    await expect(calibrationPreview).toHaveCount(0)
   } finally {
     await browser.close()
   }

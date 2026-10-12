@@ -1,6 +1,7 @@
 import type { HandLandmarker } from '@mediapipe/tasks-vision'
 import { TOUCHLESS_CONFIG } from './config'
 import type { Landmark } from './touchless.types'
+import { acquireCamera } from '../vision/camera'
 
 type Callbacks = {
   isCancelled: () => boolean
@@ -12,37 +13,28 @@ type Callbacks = {
 export async function startHandTracker(callbacks: Callbacks): Promise<() => void> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API unavailable')
 
-  let stream: MediaStream | null = null
+  let releaseCamera: (() => void) | null = null
   let landmarker: HandLandmarker | null = null
   let frameId = 0
   let stopped = false
   let lastVideoTime = -1
   let lastInferenceAt = 0
-  const video = document.createElement('video')
-  video.muted = true
-  video.playsInline = true
-
   const stop = () => {
     if (stopped) return
     stopped = true
     window.cancelAnimationFrame(frameId)
     landmarker?.close()
     landmarker = null
-    video.pause()
-    video.srcObject = null
-    stream?.getTracks().forEach((track) => track.stop())
-    stream = null
+    releaseCamera?.()
+    releaseCamera = null
   }
   const cancelled = () => stopped || callbacks.isCancelled()
 
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-    })
-    if (cancelled()) { stop(); return stop }
-    video.srcObject = stream
-    await video.play()
+    const camera = await acquireCamera()
+    if (cancelled()) { camera.release(); return stop }
+    releaseCamera = camera.release
+    const video = camera.video
     if (cancelled()) { stop(); return stop }
 
     const { FilesetResolver, HandLandmarker } = await import('@mediapipe/tasks-vision')
@@ -58,7 +50,7 @@ export async function startHandTracker(callbacks: Callbacks): Promise<() => void
       minHandPresenceConfidence: 0.6,
       minTrackingConfidence: 0.6,
     })
-    if (cancelled()) { stop(); return stop }
+    if (cancelled()) { if (stopped) landmarker.close(); else stop(); return stop }
 
     const frame = (now: number) => {
       if (cancelled()) return

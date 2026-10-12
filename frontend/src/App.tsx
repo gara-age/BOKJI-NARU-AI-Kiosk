@@ -4,6 +4,9 @@ import lottie from 'lottie-web'
 import { ChevronRight, CircleHelp, Contrast, Download, FileText, HeartHandshake, Headset, Home, Info, Keyboard, Lightbulb, MapPin, Mic, Monitor, Play, ShieldCheck, Smartphone, Type, Volume2, X } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { TouchlessCursor } from './touchless/TouchlessCursor'
+import { AdaptiveVision } from './vision/AdaptiveVision'
+import { CalibrationPanel } from './vision/CalibrationPanel'
+import type { FaceLevel } from './vision/activeUser'
 import './App.css'
 
 // A relative API keeps kiosk, QR, and external tunnel traffic on one origin.
@@ -127,6 +130,9 @@ function Kiosk() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem('navi-tts-voice') ?? 'ko-KR-SunHiNeural')
   const [screenLayout, setScreenLayout] = useState<'portrait' | 'landscape'>('portrait')
+  const [autoLevel, setAutoLevel] = useState<FaceLevel>('MID')
+  const [manualLevel, setManualLevel] = useState<FaceLevel | null>(null)
+  const [handoverPending, setHandoverPending] = useState(false)
   const [ageGroup, setAgeGroup] = useState('선택 안 함')
   const [gender, setGender] = useState('선택 안 함')
   const [conversation, setConversation] = useState<Conversation | null>(null)
@@ -163,6 +169,17 @@ function Kiosk() {
   const startWakeWordRef = useRef<((autoStart?: boolean) => Promise<void>) | null>(null)
   const avatarPollingRef = useRef<number | null>(null)
   const avatarRequestRef = useRef<string | null>(null)
+  const requestGenerationRef = useRef(0)
+  const pendingRequestsRef = useRef(new Set<AbortController>())
+  const recordingCancelledRef = useRef(false)
+  const wakeRestartTimeoutRef = useRef<number | null>(null)
+
+  const trackedFetch = async (url: string, options?: RequestInit) => {
+    const controller = new AbortController()
+    pendingRequestsRef.current.add(controller)
+    try { return await fetch(url, { ...options, signal: controller.signal }) }
+    finally { pendingRequestsRef.current.delete(controller) }
+  }
 
   useEffect(() => () => {
     recorderRef.current?.stop()
@@ -171,6 +188,7 @@ function Kiosk() {
     stopRecordingSilenceDetection()
     if (avatarPollingRef.current) window.clearTimeout(avatarPollingRef.current)
     stopWakeWord()
+    if (wakeRestartTimeoutRef.current) window.clearTimeout(wakeRestartTimeoutRef.current)
   }, [])
 
   useEffect(() => {
@@ -248,41 +266,45 @@ function Kiosk() {
   }
 
   const requestAvatarVideo = async (text: string, audioUrl: string) => {
+    const generation = requestGenerationRef.current
     stopAvatarPolling()
     try {
-      const response = await fetch(`${API}/api/avatar-jobs`, {
+      const response = await trackedFetch(`${API}/api/avatar-jobs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, audio_url: audioUrl }),
       })
       if (!response.ok) throw new Error('avatar request failed')
       const initial = await response.json() as AvatarJob
+      if (generation !== requestGenerationRef.current) return
       setAvatarJob(initial)
       if (initial.status === 'fallback') return
       avatarRequestRef.current = initial.id
       const poll = async () => {
         try {
-          const statusResponse = await fetch(`${API}/api/avatar-jobs/${initial.id}`)
+          const statusResponse = await trackedFetch(`${API}/api/avatar-jobs/${initial.id}`)
           if (!statusResponse.ok) throw new Error('avatar status failed')
           const status = await statusResponse.json() as AvatarJob
-          if (avatarRequestRef.current !== status.id) return
+          if (generation !== requestGenerationRef.current || avatarRequestRef.current !== status.id) return
           setAvatarJob(status)
           if (status.status === 'queued' || status.status === 'processing') {
             avatarPollingRef.current = window.setTimeout(() => void poll(), 3000)
           }
         } catch {
-          if (avatarRequestRef.current === initial.id) setAvatarJob({ id: initial.id, status: 'fallback' })
+          if (generation === requestGenerationRef.current && avatarRequestRef.current === initial.id) setAvatarJob({ id: initial.id, status: 'fallback' })
         }
       }
       void poll()
     } catch {
-      setAvatarJob(null)
+      if (generation === requestGenerationRef.current) setAvatarJob(null)
     }
   }
 
   const announce = async (text: string, afterGuidance: NaruState = 'idle', createAvatar = false) => {
+    const generation = requestGenerationRef.current
     setAvatarState('guiding')
     try {
-      const response = await fetch(`${API}/api/speech`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, voice: ttsVoice }) })
+      const response = await trackedFetch(`${API}/api/speech`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, voice: ttsVoice }) })
       const result = await response.json() as { audio_url?: string }
+      if (generation !== requestGenerationRef.current) return
       if (result.audio_url && audioRef.current) {
         if (createAvatar) void requestAvatarVideo(text, result.audio_url)
         audioRef.current.src = `${API}${result.audio_url}`
@@ -290,25 +312,28 @@ function Kiosk() {
         return
       }
       speakInBrowser(text)
-    } catch { speakInBrowser(text) }
-    window.setTimeout(() => setAvatarState((current) => current === 'guiding' ? afterGuidance : current), 1200)
+    } catch { if (generation === requestGenerationRef.current) speakInBrowser(text) }
+    window.setTimeout(() => { if (generation === requestGenerationRef.current) setAvatarState((current) => current === 'guiding' ? afterGuidance : current) }, 1200)
   }
 
   const transcribeRecording = async (recording: Blob) => {
+    const generation = requestGenerationRef.current
     setInputError(false)
     setAvatarState('thinking')
     setNotice('말씀하신 내용을 확인하고 있어요.')
     try {
       const form = new FormData()
       form.append('audio', new File([recording], 'navi-recording.webm', { type: recording.type || 'audio/webm' }))
-      const response = await fetch(API + '/api/transcriptions', { method: 'POST', body: form })
+      const response = await trackedFetch(API + '/api/transcriptions', { method: 'POST', body: form })
       if (!response.ok) throw new Error('transcription failed')
       const result = await response.json() as { text?: string }
+      if (generation !== requestGenerationRef.current) return
       if (!result.text?.trim()) throw new Error('empty transcription')
       setMessage(result.text.trim())
       setNotice('말씀하신 내용을 확인해 주세요. 맞으면 이 내용으로 확인을 눌러 주세요.')
       setAvatarState('idle')
     } catch {
+      if (generation !== requestGenerationRef.current) return
       setInputError(true)
       setNotice('음성을 글자로 바꾸지 못했습니다. 다시 말하거나 직접 입력해 주세요.')
       setInputMode('text')
@@ -334,6 +359,7 @@ function Kiosk() {
   }
 
   async function startWakeWord(autoStart = false) {
+    const generation = requestGenerationRef.current
     if (wakeListeningRef.current) {
       if (!autoStart) {
         stopWakeWord()
@@ -348,8 +374,10 @@ function Kiosk() {
     try {
       const statusResponse = await fetch(`${API}/api/wake-word/status`)
       const status = await statusResponse.json() as { ready?: boolean }
+      if (generation !== requestGenerationRef.current) return
       if (!status.ready) throw new Error('wake word model unavailable')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (generation !== requestGenerationRef.current) { stream.getTracks().forEach((track) => track.stop()); return }
       const context = new AudioContext()
       const source = context.createMediaStreamSource(stream)
       const processor = context.createScriptProcessor(4096, 1, 1)
@@ -399,6 +427,7 @@ function Kiosk() {
         setNotice('나루야 감지 연결에 문제가 있습니다. 말하기 버튼을 이용해 주세요.')
       }
     } catch {
+      if (generation !== requestGenerationRef.current) return
       stopWakeWord()
       if (!autoStart || !manualVoiceActionRef.current) {
         setNotice(autoStart ? '나루야 자동 감지를 시작하려면 마이크 권한을 허용해 주세요. 말하기 버튼도 사용할 수 있습니다.' : '나루야 모델 또는 마이크 권한이 필요합니다. 말하기 버튼을 이용해 주세요.')
@@ -415,6 +444,8 @@ function Kiosk() {
   }, [])
 
   const startListening = async () => {
+    const generation = requestGenerationRef.current
+    if (!conversation) setManualLevel(null)
     manualVoiceActionRef.current = true
     setInputError(false)
     if (wakeListeningRef.current) stopWakeWord()
@@ -431,9 +462,11 @@ function Kiosk() {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (generation !== requestGenerationRef.current) { stream.getTracks().forEach((track) => track.stop()); return }
       const chunks: BlobPart[] = []
       const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : undefined })
       recordingHeardSpeechRef.current = false
+      recordingCancelledRef.current = false
       silenceStoppedRecordingRef.current = false
       recordingStartedAtRef.current = performance.now()
       recordingSilenceStartedAtRef.current = null
@@ -441,6 +474,7 @@ function Kiosk() {
       recordingStreamRef.current = stream
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data) }
       recorder.onstop = () => {
+        const cancelled = recordingCancelledRef.current
         const silenceWithoutSpeech = silenceStoppedRecordingRef.current && !recordingHeardSpeechRef.current
         if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)
         recordingTimeoutRef.current = null
@@ -450,6 +484,7 @@ function Kiosk() {
         recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
         recordingStreamRef.current = null
         setListening(false)
+        if (cancelled) return
         if (silenceWithoutSpeech) {
           setInputError(true)
           setInputMode('voice')
@@ -467,6 +502,7 @@ function Kiosk() {
       setNotice('말씀을 듣고 있어요. 처음 5초 뒤부터 2초 동안 조용하면 자동으로 녹음을 마칩니다.')
       recordingTimeoutRef.current = window.setTimeout(() => recorder.state === 'recording' && recorder.stop(), 30000)
     } catch {
+      if (generation !== requestGenerationRef.current) return
       manualVoiceActionRef.current = false
       setInputError(true)
       setListening(false)
@@ -478,9 +514,10 @@ function Kiosk() {
 
   const sendConversation = async (text: string, sessionId?: string, answers: Record<string, string> = {}) => {
     if (!text.trim()) { setNotice('도움이 필요한 상황을 한 문장으로 말씀하거나 적어 주세요.'); return }
+    const generation = requestGenerationRef.current
     setLoading(true); setSummaryUrl(null); setAvatarState('thinking')
     try {
-      const response = await fetch(API + '/api/conversations', {
+      const response = await trackedFetch(API + '/api/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -492,6 +529,7 @@ function Kiosk() {
       })
       if (!response.ok) throw new Error('conversation failed')
       const result = await response.json() as Conversation
+      if (generation !== requestGenerationRef.current) return
       setConversation(result)
       setNotice(result.assistant_text)
       void announce(
@@ -500,15 +538,17 @@ function Kiosk() {
         result.recommendations.length > 0,
       )
     } catch {
+      if (generation !== requestGenerationRef.current) return
       setNotice('연결에 문제가 있습니다. 담당자에게 도움을 요청해 주세요.')
       setAvatarState('idle')
     } finally {
-      setLoading(false)
+      if (generation === requestGenerationRef.current) setLoading(false)
     }
   }
 
   const submit = async (event?: FormEvent) => {
     event?.preventDefault()
+    if (!conversation) setManualLevel(null)
     if (conversation?.clarification_key) {
       await sendConversation(message, conversation.session_id, { [conversation.clarification_key]: message })
       return
@@ -524,13 +564,47 @@ function Kiosk() {
 
   const createSummary = async () => {
     if (!conversation?.recommendations.length) return
-    const response = await fetch(`${API}/api/summaries`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: conversation.session_id, recommendation_ids: conversation.recommendations.map((item) => item.program_id) }) })
-    const result = await response.json() as { public_url: string }
-    setSummaryUrl(`${window.location.origin}${result.public_url}`)
-    setAvatarState('complete')
+    const generation = requestGenerationRef.current
+    try {
+      const response = await trackedFetch(`${API}/api/summaries`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: conversation.session_id, recommendation_ids: conversation.recommendations.map((item) => item.program_id) }) })
+      const result = await response.json() as { public_url: string }
+      if (generation !== requestGenerationRef.current) return
+      setSummaryUrl(`${window.location.origin}${result.public_url}`)
+      setAvatarState('complete')
+    } catch { if (generation === requestGenerationRef.current) setNotice('상담 요약을 만들지 못했어요. 다시 시도해 주세요.') }
   }
-  const restart = () => { stopAvatarPolling(); setMessage(''); setInputMode('voice'); setAgeGroup('선택 안 함'); setGender('선택 안 함'); setConversation(null); setSummaryUrl(null); setAvatarJob(null); setAvatarVideoOpen(false); setInputError(false); setAvatarState('idle'); setNotice('마이크를 눌러 말씀해 주세요.') }
-  const submitExample = (text: string) => { setMessage(text); void sendConversation(text) }
+  const restart = () => {
+    requestGenerationRef.current += 1
+    pendingRequestsRef.current.forEach((controller) => controller.abort())
+    pendingRequestsRef.current.clear()
+    recordingCancelledRef.current = true
+    manualVoiceActionRef.current = false
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
+    if (recordingTimeoutRef.current) window.clearTimeout(recordingTimeoutRef.current)
+    stopRecordingSilenceDetection()
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
+    stopWakeWord()
+    audioRef.current?.pause()
+    if (audioRef.current) audioRef.current.removeAttribute('src')
+    window.speechSynthesis?.cancel()
+    stopAvatarPolling()
+    setListening(false); setLoading(false); setMessage(''); setInputMode('voice')
+    setAgeGroup('선택 안 함'); setGender('선택 안 함'); setConversation(null)
+    setSummaryUrl(null); setAvatarJob(null); setAvatarVideoOpen(false)
+    setInputError(false); setAvatarState('idle'); setHandoverPending(false)
+    setManualLevel(null); setNotice('마이크를 눌러 말씀해 주세요.')
+    if (wakeRestartTimeoutRef.current) window.clearTimeout(wakeRestartTimeoutRef.current)
+    wakeRestartTimeoutRef.current = window.setTimeout(() => { wakeRestartTimeoutRef.current = null; void startWakeWordRef.current?.(true) }, 350)
+  }
+  const submitExample = (text: string) => { setManualLevel(null); setMessage(text); void sendConversation(text) }
+  const hasSessionContent = Boolean(message || conversation || listening || loading)
+  useEffect(() => {
+    if (!handoverPending || listening || loading || avatarState === 'guiding' || avatarVideoOpen) return
+    const timeout = window.setTimeout(() => restart(), 8000)
+    return () => window.clearTimeout(timeout)
+    // The timer is deliberately restarted only when activity resumes or the handover changes.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoverPending, listening, loading, avatarState, avatarVideoOpen])
   const voiceState = listening
     ? { label: '말씀을 듣고 있어요', detail: '말씀을 마치면 마이크를 다시 눌러 주세요.', kind: 'listening' }
     : loading || avatarState === 'thinking'
@@ -541,7 +615,7 @@ function Kiosk() {
           ? { label: '안내가 준비되었어요', detail: '화면의 준비사항을 확인해 주세요.', kind: 'complete' }
           : { label: '마이크를 눌러 말씀해 주세요', detail: '버튼을 누르기 전에는 녹음되지 않습니다.', kind: 'idle' }
 
-  return <main className={'kiosk-shell reference-kiosk kiosk-home layout-' + screenLayout + (largeText ? ' large-text' : '') + (highContrast ? ' high-contrast' : '')}>
+  return <main className={'kiosk-shell reference-kiosk kiosk-home layout-' + screenLayout + ' view-' + (manualLevel ?? autoLevel).toLowerCase() + (largeText ? ' large-text' : '') + (highContrast ? ' high-contrast' : '')}>
     <audio ref={audioRef} onEnded={() => setAvatarState(conversation?.recommendations.length ? 'complete' : 'idle')} />
     <header className="reference-header">
       <a className="reference-brand" href="/"><span className="reference-logo"><WaveMark /></span><span><strong>복지나루</strong><small>말로 물어보는 복지·민원 안내</small></span></a>
@@ -549,7 +623,7 @@ function Kiosk() {
         <div className="reference-tools">
           <button data-touchless="true" className={largeText ? 'active' : ''} type="button" aria-pressed={largeText} onClick={() => setLargeText((value) => !value)}><Type aria-hidden="true" /><span>글자 크게</span></button>
           <button data-touchless="true" className={highContrast ? 'active' : ''} type="button" aria-pressed={highContrast} onClick={() => setHighContrast((value) => !value)}><Contrast aria-hidden="true" /><span>고대비</span></button>
-          <button data-touchless="true" type="button" onClick={() => setSettingsOpen(true)}><Volume2 aria-hidden="true" /><span>음성 설정</span></button>
+          <button data-touchless="true" type="button" onClick={() => setSettingsOpen(true)} aria-label="음성 설정"><Volume2 aria-hidden="true" /><span>음성 설정</span></button>
           <button data-touchless="true" type="button" onClick={() => setNotice('마이크를 누르고 필요한 도움을 말씀해 주세요. 말하기가 어려우면 직접 입력하기를 눌러 주세요.')}><CircleHelp aria-hidden="true" /><span>도움말</span></button>
         </div>
       </div>
@@ -559,6 +633,11 @@ function Kiosk() {
       <div className="kiosk-character"><div className="kiosk-character-halo" /><div className={'kiosk-character-animation ' + avatarState}><NaruAnimation state={avatarState} /></div><span>언제든지 말씀해 주세요!</span></div>
     </section>
     <section className="kiosk-action-area">
+      <AdaptiveVision detectedLevel={autoLevel} appliedLevel={manualLevel ?? autoLevel} manualOverride={manualLevel !== null} onLevel={setAutoLevel} onHandover={() => { if (hasSessionContent) setHandoverPending(true) }} onReturn={() => setHandoverPending(false)} onAbsence={() => setHandoverPending(false)} />
+      {handoverPending && <div className="handover-prompt" role="alertdialog" aria-label="새 사용자 확인">
+        <strong>새로운 분이 이용 중인가요?</strong><span>계속 이용하시려면 눌러 주세요. 응답이 없으면 8초 뒤 새 상담을 시작합니다.</span>
+        <div><button type="button" onClick={() => setHandoverPending(false)}>계속 사용</button><button type="button" onClick={restart}>새로 시작</button></div>
+      </div>}
       <TouchlessCursor />
       <div className={'kiosk-voice-state ' + voiceState.kind} aria-live="polite"><span>{voiceState.label}</span><small>{voiceState.detail}</small></div>
       <div className="kiosk-input-actions">
@@ -591,6 +670,7 @@ function Kiosk() {
         <header><div><p>환경설정</p><h2 id="settings-title">음성과 화면을 설정하세요</h2></div><button data-touchless="true" type="button" className="reference-settings-close" onClick={() => setSettingsOpen(false)} aria-label="환경설정 닫기"><X aria-hidden="true" /></button></header>
         <label htmlFor="tts-voice">TTS 안내 음성<select id="tts-voice" value={ttsVoice} onChange={(event) => setTtsVoice(event.target.value)}>{ttsVoiceOptions.map((voice) => <option key={voice.value} value={voice.value}>{voice.label}</option>)}</select></label>
         <div className="reference-layout-settings" role="group" aria-label="화면 배치 선택"><span>화면 배치</span><button className={screenLayout === 'portrait' ? 'active' : ''} type="button" aria-pressed={screenLayout === 'portrait'} onClick={() => setScreenLayout('portrait')}><Smartphone aria-hidden="true" />세로형</button><button className={screenLayout === 'landscape' ? 'active' : ''} type="button" aria-pressed={screenLayout === 'landscape'} onClick={() => setScreenLayout('landscape')}><Monitor aria-hidden="true" />가로형</button></div>
+        <label htmlFor="view-height">조작 버튼 높이<select id="view-height" value={manualLevel ?? 'AUTO'} onChange={(event) => setManualLevel(event.target.value === 'AUTO' ? null : event.target.value as FaceLevel)}><option value="AUTO">자동 조정</option><option value="LOW">낮게 보기</option><option value="MID">기본 보기</option><option value="HIGH">높게 보기</option></select></label>
         <p>선택한 음성은 이 기기의 다음 안내부터 적용됩니다.</p>
         <div className="reference-settings-actions"><button data-touchless="true" type="button" className="reference-settings-preview" onClick={() => void announce('안녕하세요. 복지나루 AI 안내 도우미 나루입니다. 필요한 도움을 편하게 말씀해 주세요.') }><Volume2 aria-hidden="true" /> 미리 듣기</button><button data-touchless="true" type="button" className="reference-settings-confirm" onClick={() => setSettingsOpen(false)}>확인</button></div>
       </section>
@@ -685,7 +765,7 @@ function Admin() {
   if (!token) return <main className="admin-shell"><a className="brand" href="/">NAVI <span>민원 준비 도우미</span></a><form className="login-card" onSubmit={login}><p className="eyebrow">담당자 전용</p><h1>관리자 로그인</h1><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus /></label>{error && <p className="error">{error}</p>}<button className="primary-button">로그인</button></form></main>
 
   const visiblePrograms = programs.filter((program) => reviewFilter === 'all' || program.review_status === reviewFilter)
-  return <main className="admin-shell"><header className="topbar"><a className="brand" href="/">NAVI <span>민원 준비 도우미</span></a><button className="text-button" onClick={() => { sessionStorage.removeItem('navi-admin-token'); setToken('') }}>로그아웃</button></header><section className="admin-content"><p className="eyebrow">담당자 관리자 화면</p><h1>상담·공식 정보 운영</h1>{error && <p className="error">{error}</p>}{overview && <><div className="metric-row"><div><strong>{overview.total_sessions}</strong><span>상담 세션</span></div><div><strong>{overview.handoff_count}</strong><span>담당자 확인 요청</span></div><div><strong>{overview.approved_programs}</strong><span>검토 완료 항목</span></div><div><strong>{overview.needs_review_programs}</strong><span>검토 대기 항목</span></div></div><section className="summary-list admin-area"><div><p className="eyebrow">지역 복지서비스</p><h2>파일럿 지역 설정</h2><p>이 설정은 지자체 복지서비스 API 조회에만 사용됩니다. 키오스크 이용자는 지역을 선택할 수 없습니다.</p></div><div className="area-fields"><label>시·도<select value={pilotArea.sido ?? ''} onChange={(event) => setPilotArea((area) => ({ ...area, sido: event.target.value || null, sigungu: event.target.value ? area.sigungu : null }))}>{sidoOptions.map((item) => <option key={item} value={item}>{item || '선택 안 함'}</option>)}</select></label><label>시·군·구<input value={pilotArea.sigungu ?? ''} placeholder="예: 성동구" disabled={!pilotArea.sido} onChange={(event) => setPilotArea((area) => ({ ...area, sigungu: event.target.value }))} /></label><button type="button" className="primary-button" disabled={savingArea} onClick={() => void savePilotArea()}>{savingArea ? '저장 중' : '지역 적용'}</button></div>{pilotArea.updated_at && <small>마지막 변경: {new Date(pilotArea.updated_at).toLocaleString('ko-KR')} · {pilotArea.updated_by}</small>}</section><section className="summary-list"><div className="review-heading"><div><h2>공식 정보 검토 대기열</h2><p>공공데이터 API에서 새로 발견한 항목은 검토 전까지 키오스크에 담당자 확인 필요로 표시됩니다.</p></div><label>표시<select value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value as typeof reviewFilter)}><option value="needs_review">검토 필요</option><option value="approved">검토 완료</option><option value="all">전체</option></select></label></div>{visiblePrograms.length === 0 ? <p>이 상태의 안내 항목이 없습니다.</p> : visiblePrograms.map((program) => <article className="program-review" key={program.program_id}><div><strong>{program.plain_name}</strong><p>{program.source.name} · 확인일 {program.source.checked_at} · {program.origin === 'public-data' ? 'API 항목' : '시드 항목'}</p><small>{program.note || '검토 메모 없음'}</small></div><div><span className={program.review_status === 'approved' ? 'review-approved' : 'review-pending'}>{program.review_status === 'approved' ? '검토 완료' : '검토 필요'}</span><button type="button" onClick={() => void toggleHistory(program.program_id)}>{history[program.program_id] ? '이력 닫기' : '검토 이력'}</button><button type="button" onClick={() => void updateReview(program.program_id, program.review_status === 'approved' ? 'needs_review' : 'approved')}>{program.review_status === 'approved' ? '재검토 표시' : '검토 완료 처리'}</button></div>{history[program.program_id] && <ol className="review-history">{history[program.program_id].length === 0 ? <li>변경 이력이 없습니다.</li> : history[program.program_id].map((item, index) => <li key={item.changed_at + index}><strong>{item.review_status === 'approved' ? '검토 완료' : '검토 필요'}</strong> · {new Date(item.changed_at).toLocaleString('ko-KR')} · {item.note || '메모 없음'}</li>)}</ol>}</article>)}</section><section className="summary-list"><h2>전달된 상담 요약</h2>{overview.summaries.length === 0 ? <p>아직 전달된 상담 요약이 없습니다.</p> : overview.summaries.map((item) => <article key={item.token}><p>{item.masked_text}</p><strong>{item.recommendation_names.join(', ')}</strong><span>{new Date(item.created_at).toLocaleString('ko-KR')} 생성</span></article>)}</section></>}</section></main>
+  return <main className="admin-shell"><header className="topbar"><a className="brand" href="/">NAVI <span>민원 준비 도우미</span></a><button className="text-button" onClick={() => { sessionStorage.removeItem('navi-admin-token'); setToken('') }}>로그아웃</button></header><section className="admin-content"><p className="eyebrow">담당자 관리자 화면</p><h1>상담·공식 정보 운영</h1>{error && <p className="error">{error}</p>}<CalibrationPanel />{overview && <><div className="metric-row"><div><strong>{overview.total_sessions}</strong><span>상담 세션</span></div><div><strong>{overview.handoff_count}</strong><span>담당자 확인 요청</span></div><div><strong>{overview.approved_programs}</strong><span>검토 완료 항목</span></div><div><strong>{overview.needs_review_programs}</strong><span>검토 대기 항목</span></div></div><section className="summary-list admin-area"><div><p className="eyebrow">지역 복지서비스</p><h2>파일럿 지역 설정</h2><p>이 설정은 지자체 복지서비스 API 조회에만 사용됩니다. 키오스크 이용자는 지역을 선택할 수 없습니다.</p></div><div className="area-fields"><label>시·도<select value={pilotArea.sido ?? ''} onChange={(event) => setPilotArea((area) => ({ ...area, sido: event.target.value || null, sigungu: event.target.value ? area.sigungu : null }))}>{sidoOptions.map((item) => <option key={item} value={item}>{item || '선택 안 함'}</option>)}</select></label><label>시·군·구<input value={pilotArea.sigungu ?? ''} placeholder="예: 성동구" disabled={!pilotArea.sido} onChange={(event) => setPilotArea((area) => ({ ...area, sigungu: event.target.value }))} /></label><button type="button" className="primary-button" disabled={savingArea} onClick={() => void savePilotArea()}>{savingArea ? '저장 중' : '지역 적용'}</button></div>{pilotArea.updated_at && <small>마지막 변경: {new Date(pilotArea.updated_at).toLocaleString('ko-KR')} · {pilotArea.updated_by}</small>}</section><section className="summary-list"><div className="review-heading"><div><h2>공식 정보 검토 대기열</h2><p>공공데이터 API에서 새로 발견한 항목은 검토 전까지 키오스크에 담당자 확인 필요로 표시됩니다.</p></div><label>표시<select value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value as typeof reviewFilter)}><option value="needs_review">검토 필요</option><option value="approved">검토 완료</option><option value="all">전체</option></select></label></div>{visiblePrograms.length === 0 ? <p>이 상태의 안내 항목이 없습니다.</p> : visiblePrograms.map((program) => <article className="program-review" key={program.program_id}><div><strong>{program.plain_name}</strong><p>{program.source.name} · 확인일 {program.source.checked_at} · {program.origin === 'public-data' ? 'API 항목' : '시드 항목'}</p><small>{program.note || '검토 메모 없음'}</small></div><div><span className={program.review_status === 'approved' ? 'review-approved' : 'review-pending'}>{program.review_status === 'approved' ? '검토 완료' : '검토 필요'}</span><button type="button" onClick={() => void toggleHistory(program.program_id)}>{history[program.program_id] ? '이력 닫기' : '검토 이력'}</button><button type="button" onClick={() => void updateReview(program.program_id, program.review_status === 'approved' ? 'needs_review' : 'approved')}>{program.review_status === 'approved' ? '재검토 표시' : '검토 완료 처리'}</button></div>{history[program.program_id] && <ol className="review-history">{history[program.program_id].length === 0 ? <li>변경 이력이 없습니다.</li> : history[program.program_id].map((item, index) => <li key={item.changed_at + index}><strong>{item.review_status === 'approved' ? '검토 완료' : '검토 필요'}</strong> · {new Date(item.changed_at).toLocaleString('ko-KR')} · {item.note || '메모 없음'}</li>)}</ol>}</article>)}</section><section className="summary-list"><h2>전달된 상담 요약</h2>{overview.summaries.length === 0 ? <p>아직 전달된 상담 요약이 없습니다.</p> : overview.summaries.map((item) => <article key={item.token}><p>{item.masked_text}</p><strong>{item.recommendation_names.join(', ')}</strong><span>{new Date(item.created_at).toLocaleString('ko-KR')} 생성</span></article>)}</section></>}</section></main>
 }
 
 function Summary() {
