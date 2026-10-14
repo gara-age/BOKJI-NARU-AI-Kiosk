@@ -21,6 +21,28 @@ def test_returns_welfare_guidance(tmp_path: Path) -> None:
     assert response.staff_handoff is True
 
 
+def test_selected_region_reaches_provider_without_changing_default(tmp_path: Path) -> None:
+    class RegionProvider(SeedOfficialInfoProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.selected: tuple[str, str | None] | None = None
+
+        def search_region(self, category: str, sido: str, sigungu: str | None):
+            self.selected = (sido, sigungu)
+            return self.search(category)
+
+    settings = Settings(database_path=tmp_path / "region.sqlite3")
+    provider = RegionProvider()
+    conversation_service = ConversationService(settings, Store(settings.database_path), provider)
+    response = asyncio.run(conversation_service.respond(ConversationRequest(
+        text="기초생활 지원을 알고 싶어요", demographics=Demographics(age_group="35~64세"),
+        region_sido="인천광역시", region_sigungu="부평구",
+    )))
+
+    assert response.recommendations
+    assert provider.selected == ("인천광역시", "부평구")
+
+
 def test_sensitive_question_requires_handoff(tmp_path: Path) -> None:
     response = asyncio.run(service(tmp_path).respond(ConversationRequest(text="주민번호 900101-1234567로 지원 확인해줘")))
     assert response.staff_handoff is True

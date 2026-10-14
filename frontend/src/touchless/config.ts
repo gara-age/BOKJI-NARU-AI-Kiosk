@@ -1,5 +1,6 @@
 export const TOUCHLESS_CONFIG = {
   frameIntervalMs: 40,
+  handAcquisitionMs: 350,
   smoothingMinAlpha: 0.2,
   smoothingMaxAlpha: 0.65,
   cursorDeadZonePx: 3,
@@ -7,8 +8,8 @@ export const TOUCHLESS_CONFIG = {
   maxFrameJumpRatio: 0.18,
   confirmedJumpRadiusRatio: 0.08,
   acquisitionRadiusRatio: 0.08,
-  pinchStartRatio: 0.35,
-  pinchReleaseRatio: 0.55,
+  pinchStartRatio: 0.32,
+  pinchReleaseRatio: 0.42,
   hoverDwellMs: 120,
   pinchTargetTolerancePx: 24,
   trackingLostMs: 300,

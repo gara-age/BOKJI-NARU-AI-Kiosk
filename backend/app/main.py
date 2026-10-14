@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,9 @@ from .schemas import (AdminOverview, AdminProgramReview, AdminSummary, AvatarJob
                       SummaryDetailResponse, SummaryRequest, SummaryResponse)
 from .services import AvatarService, ConversationService, SpeechService, TranscriptionService, WakeWordService, issue_admin_token
 from .store import Store
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="Navi 주민센터 데모 API", version="0.1.0")
@@ -78,6 +82,7 @@ async def transcription(audio: UploadFile = File(...)) -> dict[str, object]:
     try:
         text = await __import__("asyncio").to_thread(transcriptions.transcribe, payload, Path(audio.filename or "audio.webm").suffix)
     except Exception as exc:
+        logger.exception("STT request failed (content_type=%s, bytes=%d)", audio.content_type, len(payload))
         raise HTTPException(status_code=503, detail="음성 인식 서비스를 사용할 수 없습니다. 내용을 직접 입력해 주세요.") from exc
     return {"text": text, "stored": False}
 

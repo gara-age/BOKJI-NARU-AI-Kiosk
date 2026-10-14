@@ -5,7 +5,7 @@ import { acquireCamera } from '../vision/camera'
 
 type Callbacks = {
   isCancelled: () => boolean
-  onHand: (landmarks: Landmark[], width: number, height: number, now: number) => void
+  onHands: (landmarks: Landmark[][], width: number, height: number, now: number) => void
   onMissing: (now: number) => void
   onError: () => void
 }
@@ -45,7 +45,7 @@ export async function startHandTracker(callbacks: Callbacks): Promise<() => void
     landmarker = await HandLandmarker.createFromOptions(fileset, {
       baseOptions: { modelAssetPath: `${base}models/hand_landmarker.task`, delegate: 'CPU' },
       runningMode: 'VIDEO',
-      numHands: 1,
+      numHands: 2,
       minHandDetectionConfidence: 0.6,
       minHandPresenceConfidence: 0.6,
       minTrackingConfidence: 0.6,
@@ -58,8 +58,8 @@ export async function startHandTracker(callbacks: Callbacks): Promise<() => void
         if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentTime !== lastVideoTime && now - lastInferenceAt >= TOUCHLESS_CONFIG.frameIntervalMs) {
           lastVideoTime = video.currentTime
           lastInferenceAt = now
-          const hand = landmarker?.detectForVideo(video, now).landmarks[0]
-          if (hand) callbacks.onHand(hand, video.videoWidth, video.videoHeight, now)
+          const hands = landmarker?.detectForVideo(video, now).landmarks ?? []
+          if (hands.length) callbacks.onHands(hands, video.videoWidth, video.videoHeight, now)
           else callbacks.onMissing(now)
         }
       } catch {

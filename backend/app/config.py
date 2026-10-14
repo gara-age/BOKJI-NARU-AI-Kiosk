@@ -37,10 +37,11 @@ class Settings:
     stt_model: str = os.getenv("STT_MODEL", "medium")
     stt_device: str = os.getenv("STT_DEVICE", "cpu")
     stt_compute_type: str = os.getenv("STT_COMPUTE_TYPE", "int8")
+    stt_cpu_threads: int = int(os.getenv("STT_CPU_THREADS", "4"))
     wake_word_enabled: bool = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
     wake_word_model_path: Path = Path(os.getenv("WAKE_WORD_MODEL_PATH", "./models/naruya.onnx"))
-    wake_word_threshold: float = float(os.getenv("WAKE_WORD_THRESHOLD", "0.5"))
-    wake_word_min_rms: float = float(os.getenv("WAKE_WORD_MIN_RMS", "0.008"))
+    wake_word_threshold: float = float(os.getenv("WAKE_WORD_THRESHOLD", "0.75"))
+    wake_word_min_rms: float = float(os.getenv("WAKE_WORD_MIN_RMS", "0.02"))
 
 
 settings = Settings()

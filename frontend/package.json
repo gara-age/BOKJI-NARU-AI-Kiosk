@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "export:ui-preview": "node scripts/export-ui-preview.mjs",
     "lint": "oxlint",
     "test:e2e": "playwright test",
     "preview": "vite preview"

@@ -73,3 +73,18 @@ def test_public_data_provider_prioritizes_service_name_over_summary_keywords() -
     matches = provider._best_matches(catalog, "basic")
 
     assert matches[0]["servId"] == "direct"
+
+
+def test_consultation_region_queries_local_without_changing_admin_default() -> None:
+    client = FakeClient()
+    provider = PublicDataOfficialInfoProvider(
+        "test-key", fallback=SeedOfficialInfoProvider(), local_sido="서울특별시", client_factory=lambda: client,
+    )
+
+    result = provider.search_region("basic", "인천광역시", "부평구")
+
+    assert {item.source.name for item in result} == {"공공데이터포털 · 복지로", "공공데이터포털 · 지자체 복지서비스"}
+    local_request = next(call for call in client.calls if "LcgvWelfarelist" in str(call["url"]))
+    assert local_request["params"]["ctpvNm"] == "인천광역시"
+    assert local_request["params"]["sggNm"] == "부평구"
+    assert provider.local_sido == "서울특별시"

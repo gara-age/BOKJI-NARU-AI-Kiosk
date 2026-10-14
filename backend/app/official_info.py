@@ -291,14 +291,22 @@ class PublicDataOfficialInfoProvider:
         self.local_sido = local_sido
         self.local_sigungu = local_sigungu
         self.client_factory = client_factory or (lambda: httpx.Client(timeout=self.timeout_seconds, follow_redirects=True))
-        self._catalog_by_category: dict[str, tuple[list[dict[str, str]], datetime]] = {}
+        self._catalog_by_category: dict[tuple[str, str | None, str | None], tuple[list[dict[str, str]], datetime]] = {}
         self._recommendation_names: dict[str, str] = {}
         self.last_error: str | None = None
         self.source_errors: dict[str, str] = {}
 
     def search(self, category: str) -> list[Recommendation]:
+        return self.search_region(category, self.local_sido, self.local_sigungu)
+
+    def search_region(self, category: str, sido: str | None, sigungu: str | None) -> list[Recommendation]:
         try:
-            matches = self._best_matches(self._catalog_records(category), category)
+            catalog = self._catalog_records(category, sido, sigungu)
+            if sido and category != "local":
+                matches = self._best_matches([item for item in catalog if item.get("_source") == "national"], category)[:1]
+                matches += self._best_matches([item for item in catalog if item.get("_source") == "local"], category)[:1]
+            else:
+                matches = self._best_matches(catalog, category)
             recommendations = [self._to_recommendation(item, category) for item in matches]
             recommendations = [item for item in recommendations if item is not None]
             if recommendations:
@@ -353,34 +361,32 @@ class PublicDataOfficialInfoProvider:
             "local_area": {"sido": self.local_sido, "sigungu": self.local_sigungu},
         }
 
-    def _catalog_records(self, category: str) -> list[dict[str, str]]:
-        cached = self._catalog_by_category.get(category)
+    def _catalog_records(self, category: str, sido: str | None = None, sigungu: str | None = None) -> list[dict[str, str]]:
+        cache_key = (category, sido, sigungu)
+        cached = self._catalog_by_category.get(cache_key)
         if cached and cached[1] > datetime.now():
             return cached[0]
         records: list[dict[str, str]] = []
         source_errors: dict[str, str] = {}
         sources = [] if category == "local" else [("national", self.national_list_url)]
-        # Local catalogs include every municipality. Only an administrator may
-        # choose the pilot area; kiosk visitors never choose a region themselves.
-        if self.local_sido:
+        if sido:
             sources.append(("local", self.local_list_url))
         for source, url in sources:
             try:
-                records.extend(self._fetch_catalog(url, source, category))
+                records.extend(self._fetch_catalog(url, source, category, sido, sigungu))
             except (httpx.HTTPError, ElementTree.ParseError, ValueError) as exc:
                 source_errors[source] = type(exc).__name__
         self.source_errors = source_errors
         if not records:
             raise ValueError("Public-data catalog returned no records")
-        self._catalog_by_category[category] = (records, datetime.now() + timedelta(minutes=self.cache_minutes))
+        self._catalog_by_category[cache_key] = (records, datetime.now() + timedelta(minutes=self.cache_minutes))
         return records
 
-    def _fetch_catalog(self, url: str, source: str, category: str = "") -> list[dict[str, str]]:
+    def _fetch_catalog(self, url: str, source: str, category: str = "", sido: str | None = None, sigungu: str | None = None) -> list[dict[str, str]]:
         records: list[dict[str, str]] = []
         # The central API supports category searches; exact terms are tried first
         # for ambiguous areas such as elder care and veteran support.
-        # Local data is paged fully only after a pilot area has been configured.
-        page_limit = 1 if source == "national" or not self.local_sido else self.max_pages
+        page_limit = 1 if source == "national" or not sido else self.max_pages
         with self.client_factory() as client:
             query_terms = self.category_query_terms.get(category) or (self.category_terms.get(category, ("",))[0],)
             for query_term in query_terms if source == "national" else (None,):
@@ -390,10 +396,10 @@ class PublicDataOfficialInfoProvider:
                         params["srchKeyCode"] = "003"
                         if query_term:
                             params["searchWrd"] = query_term
-                    if source == "local" and self.local_sido:
-                        params["ctpvNm"] = self.local_sido
-                    if source == "local" and self.local_sigungu:
-                        params["sggNm"] = self.local_sigungu
+                    if source == "local" and sido:
+                        params["ctpvNm"] = sido
+                    if source == "local" and sigungu:
+                        params["sggNm"] = sigungu
                     response = client.get(url, params=params)
                     response.raise_for_status()
                     page_records = self._records_from_xml(response.content, "servList")

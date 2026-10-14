@@ -4,10 +4,36 @@ test('pinch has one click per open-to-closed gesture', async ({ page }) => {
   await page.goto('/')
   const result = await page.evaluate(async () => {
     const { PinchGate } = await import('/src/touchless/GestureDetector.ts')
-    const gate = new PinchGate(0.35, 0.55)
-    return [0.8, 0.3, 0.2, 0.4, 0.7, 0.3, 0.2].map((ratio) => gate.update(ratio))
+    const gate = new PinchGate(0.32, 0.42)
+    return [0.8, 0.3, 0.2, 0.4, 0.5, 0.5, 0.3, 0.2].map((ratio) => gate.update(ratio))
   })
-  expect(result).toEqual([false, true, false, false, false, true, false])
+  expect(result).toEqual([false, false, true, false, false, false, false, true])
+})
+
+test('a folded index finger cannot arm a pinch', async ({ page }) => {
+  await page.goto('/')
+  const result = await page.evaluate(async () => {
+    const { indexExtended, pinchRatio, PinchGate } = await import('/src/touchless/GestureDetector.ts')
+    const hand = (folded: boolean) => {
+      const points = Array.from({ length: 21 }, () => ({ x: .5, y: .5 }))
+      points[5] = { x: .4, y: .6 }
+      points[17] = { x: .6, y: .6 }
+      points[6] = { x: .43, y: .57 }
+      points[8] = folded ? { x: .42, y: .62 } : { x: .5, y: .5 }
+      points[4] = folded ? { x: .43, y: .61 } : { x: .51, y: .5 }
+      return points
+    }
+    const gate = new PinchGate(.32, .42)
+    const open = hand(false)
+    open[4] = { x: .8, y: .5 }
+    gate.update(pinchRatio(open, 640, 480), indexExtended(open, 640, 480))
+    const fist = hand(true)
+    const falseStarts = [0, 1, 2].map(() => gate.update(pinchRatio(fist, 640, 480), indexExtended(fist, 640, 480)))
+    const pinch = hand(false)
+    const realStarts = [0, 1].map(() => gate.update(pinchRatio(pinch, 640, 480), indexExtended(pinch, 640, 480)))
+    return { fistExtended: indexExtended(fist, 640, 480), falseStarts, realStarts }
+  })
+  expect(result).toEqual({ fistExtended: false, falseStarts: [false, false, false], realStarts: [false, true] })
 })
 
 test('cursor rejects a one-frame jump but follows a confirmed move', async ({ page }) => {
@@ -51,6 +77,7 @@ test('controller dispatches one existing DOM click per pinch', async ({ page }) 
       const landmarks = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.5 }))
       landmarks[4] = { x: thumbX, y: 0.5 }
       landmarks[5] = { x: 0.4, y: 0.6 }
+      landmarks[6] = { x: 0.43, y: 0.57 }
       landmarks[17] = { x: 0.6, y: 0.6 }
       return landmarks
     }
@@ -63,6 +90,7 @@ test('controller dispatches one existing DOM click per pinch', async ({ page }) 
     controller.onHand(hand(0.8), 640, 480, 1400)
     controller.onHand(hand(0.8), 640, 480, 1540)
     controller.onHand(hand(0.51), 640, 480, 1580)
+    controller.onHand(hand(0.51), 640, 480, 1620)
     const second = count
     controller.dispose()
     target.remove()

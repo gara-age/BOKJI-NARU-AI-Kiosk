@@ -19,6 +19,8 @@ class ConversationRequest(BaseModel):
     session_id: str | None = None
     demographics: Demographics = Field(default_factory=Demographics)
     answers: dict[str, str] = Field(default_factory=dict)
+    region_sido: str | None = Field(default=None, max_length=30)
+    region_sigungu: str | None = Field(default=None, max_length=30)
 
 
 class Source(BaseModel):

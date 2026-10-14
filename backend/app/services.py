@@ -122,7 +122,7 @@ class ConversationService:
         )
         if request.demographics.age_group:
             self.store.update_session(session_id, age_group=request.demographics.age_group, pending_key="complete", handoff=True)
-            return self._final_response(session_id, masked_text, category)
+            return self._final_response(session_id, masked_text, category, request)
         return ConversationResponse(
             session_id=session_id,
             masked_text=masked_text,
@@ -183,17 +183,20 @@ class ConversationService:
                     clarification_key="support_type", clarification_options=list(SUPPORT_OPTIONS), staff_handoff=True,
                 )
             self.store.update_session(str(session["id"]), age_group=age_group, pending_key="complete", handoff=True)
-            return self._final_response(str(session["id"]), masked_text, category)
+            return self._final_response(str(session["id"]), masked_text, category, request)
         category = str(session.get("category") or "")
         if category in KEYWORDS:
-            return self._final_response(str(session["id"]), masked_text, category)
+            return self._final_response(str(session["id"]), masked_text, category, request)
         return ConversationResponse(
             session_id=str(session["id"]), masked_text=masked_text,
             assistant_text="담당자와 함께 확인해 주세요.", staff_handoff=True,
         )
 
-    def _final_response(self, session_id: str, masked_text: str, category: str) -> ConversationResponse:
-        recommendations = self.provider.search(category)
+    def _final_response(self, session_id: str, masked_text: str, category: str, request: ConversationRequest) -> ConversationResponse:
+        if request.region_sido and hasattr(self.provider, "search_region"):
+            recommendations = self.provider.search_region(category, request.region_sido, request.region_sigungu)
+        else:
+            recommendations = self.provider.search(category)
         if not recommendations:
             return ConversationResponse(
                 session_id=session_id, masked_text=masked_text,
@@ -354,18 +357,27 @@ class TranscriptionService:
             "model": self.settings.stt_model,
             "device": self.settings.stt_device,
             "compute_type": self.settings.stt_compute_type,
+            "cpu_threads": self.settings.stt_cpu_threads,
             "reason": reason,
         }
 
     def transcribe(self, payload: bytes, suffix: str) -> str:
         if self.model is None:
             from faster_whisper import WhisperModel
-            self.model = WhisperModel(self.settings.stt_model, device=self.settings.stt_device, compute_type=self.settings.stt_compute_type)
-        with tempfile.NamedTemporaryFile(suffix=suffix or ".webm", delete=True) as source:
-            source.write(payload)
-            source.flush()
-            segments, _ = self.model.transcribe(source.name, language="ko", vad_filter=True, beam_size=5, condition_on_previous_text=False)
+            self.model = WhisperModel(
+                self.settings.stt_model,
+                device=self.settings.stt_device,
+                compute_type=self.settings.stt_compute_type,
+                cpu_threads=self.settings.stt_cpu_threads,
+            )
+        with tempfile.NamedTemporaryFile(suffix=suffix or ".webm", delete=False) as source:
+            source_path = Path(source.name)
+        try:
+            source_path.write_bytes(payload)
+            segments, _ = self.model.transcribe(str(source_path), language="ko", vad_filter=True, beam_size=5, condition_on_previous_text=False)
             return " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+        finally:
+            source_path.unlink(missing_ok=True)
 
 
 class WakeWordService:
@@ -379,6 +391,9 @@ class WakeWordService:
         self._model: Any | None = None
         self._model_error: str | None = None
         self._pending_samples: Any | None = None
+        self._noise_rms = 0.0
+        self._calibration_frames = 0
+        self._positive_frames = 0
 
     def status(self) -> dict[str, object]:
         configured = self.settings.wake_word_enabled and self.settings.wake_word_model_path.is_file()
@@ -393,6 +408,12 @@ class WakeWordService:
 
     def reset(self) -> None:
         self._pending_samples = None
+        self._noise_rms = 0.0
+        self._calibration_frames = 0
+        self._positive_frames = 0
+        reset_model = getattr(self._model, "reset", None)
+        if callable(reset_model):
+            reset_model()
 
     @staticmethod
     def _normalized_rms(samples: Any) -> float:
@@ -412,22 +433,31 @@ class WakeWordService:
             samples = np.frombuffer(pcm, dtype=np.int16)
             if self._pending_samples is not None:
                 samples = np.concatenate((self._pending_samples, samples))
-            # The custom model can score a silent frame highly. Gate inference by
-            # microphone energy so a new connection cannot activate itself.
-            if self._normalized_rms(samples) < self.settings.wake_word_min_rms:
-                self._pending_samples = None
-                return None
-            best_score: float | None = None
             while len(samples) >= self.frame_samples:
                 frame, samples = samples[:self.frame_samples], samples[self.frame_samples:]
+                rms = self._normalized_rms(frame)
+                if self._calibration_frames < 12:
+                    self._noise_rms = (self._noise_rms * self._calibration_frames + rms) / (self._calibration_frames + 1)
+                    self._calibration_frames += 1
+                    self._positive_frames = 0
+                    continue
+                min_rms = max(self.settings.wake_word_min_rms, self._noise_rms * 2.5)
+                if rms < min_rms:
+                    self._noise_rms = self._noise_rms * 0.98 + rms * 0.02
+                    self._positive_frames = 0
+                    continue
                 scores = self._model.predict(frame)
                 score = max((float(value) for value in scores.values()), default=0.0)
-                best_score = max(best_score or 0.0, score)
                 if score >= self.settings.wake_word_threshold:
-                    self._pending_samples = None
-                    return score
+                    self._positive_frames += 1
+                    if self._positive_frames >= 2:
+                        self._pending_samples = None
+                        self._positive_frames = 0
+                        return score
+                else:
+                    self._positive_frames = 0
             self._pending_samples = samples.copy()
-            return best_score
+            return None
         except Exception as exc:
             self._model_error = str(exc)
             return None

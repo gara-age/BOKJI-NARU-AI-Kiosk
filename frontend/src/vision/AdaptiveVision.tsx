@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Camera, CameraOff } from 'lucide-react'
+import { CameraOff } from 'lucide-react'
 import { ActiveUserTracker, type FaceLevel, type FaceObservation } from './activeUser'
 import { classifyAdaptiveHeight, loadCalibration, type HeightDecision } from './calibration'
 import { startFaceCamera } from './faceCamera'
+import { clearInteractionOwner, updateInteractionOwner } from './interactionOwner'
 
 type Props = {
   onLevel: (level: FaceLevel) => void
@@ -13,16 +14,17 @@ type Props = {
   detectedLevel: FaceLevel
   appliedLevel: FaceLevel
   manualOverride: boolean
+  debugOpen: boolean
+  onDebugClose: () => void
 }
 
-export function AdaptiveVision({ onLevel, onHandover, onReturn, onAbsence, detectedLevel, appliedLevel, manualOverride }: Props) {
+export function AdaptiveVision({ onLevel, onHandover, onReturn, onAbsence, detectedLevel, appliedLevel, manualOverride, debugOpen, onDebugClose }: Props) {
   const callbacks = useRef({ onLevel, onHandover, onReturn, onAbsence })
   useEffect(() => { callbacks.current = { onLevel, onHandover, onReturn, onAbsence } }, [onLevel, onHandover, onReturn, onAbsence])
   const [retry, setRetry] = useState(0)
   const [visible, setVisible] = useState(!document.hidden)
   const [status, setStatus] = useState<'starting' | 'ready' | 'error'>('starting')
   const [tracking, setTracking] = useState<'searching' | 'active' | 'recalibrating'>('searching')
-  const [debugOpen, setDebugOpen] = useState(false)
   const debugOpenRef = useRef(false)
   const previewRef = useRef<HTMLVideoElement>(null)
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null)
@@ -62,6 +64,7 @@ export function AdaptiveVision({ onLevel, onHandover, onReturn, onAbsence, detec
     let recalibrating = false
     const fail = () => {
       if (cancelled) return
+      clearInteractionOwner()
       setStatus('error')
       setTracking('searching')
       setPreviewStream(null)
@@ -80,6 +83,7 @@ export function AdaptiveVision({ onLevel, onHandover, onReturn, onAbsence, detec
       },
       onFaces: (faces, now) => {
         const { face, event } = tracker.update(faces, now)
+        updateInteractionOwner(faces, face, now, Boolean(event))
         const decision = face ? classifyAdaptiveHeight(face, calibration) : null
         if (debugOpenRef.current) { setDebugFaces(faces); setActiveFace(face); setDebugDecision(decision) }
         if (event?.type === 'changed') { recalibrating = true; setTracking('recalibrating'); callbacks.current.onHandover(); pendingLevel = null }
@@ -101,16 +105,12 @@ export function AdaptiveVision({ onLevel, onHandover, onReturn, onAbsence, detec
       if (cancelled) cleanup()
       else { stop = cleanup; setStatus('ready') }
     }).catch(fail)
-    return () => { cancelled = true; stop?.(); setPreviewStream(null); setDebugFaces([]); setActiveFace(null); setDebugDecision(null) }
+    return () => { cancelled = true; clearInteractionOwner(); stop?.(); setPreviewStream(null); setDebugFaces([]); setActiveFace(null); setDebugDecision(null) }
   }, [retry, visible])
 
-  return <><div className="adaptive-vision-status" role="status">
-    {status === 'error' ? <><CameraOff aria-hidden="true" /><span>카메라를 사용할 수 없어 기본 화면을 표시합니다.</span><button type="button" onClick={() => { setStatus('starting'); setRetry((value) => value + 1) }}>다시 시도</button></>
-      : <><Camera aria-hidden="true" /><span>{status === 'starting' ? '시점 조정 카메라를 준비하고 있어요' : !calibrated ? '높이 보정이 없어 기본 화면(MID)을 표시합니다' : tracking === 'recalibrating' ? '새 사용자 시점을 확인하고 있어요' : tracking === 'active' ? '시점에 맞춰 화면을 조정했어요' : '이용자 시점을 확인하고 있어요'} · 영상은 저장·전송하지 않습니다.</span></>}
-    <button type="button" aria-expanded={debugOpen} aria-controls="vision-debug-panel" onClick={() => { setDebugOpen((open) => !open); setDebugFaces([]); setActiveFace(null); setDebugDecision(null) }}>{debugOpen ? '디버그 닫기' : '카메라 디버그 보기'}</button>
-  </div>
+  return <>{status === 'error' && <div className="adaptive-vision-status" role="status"><CameraOff aria-hidden="true" /><span>카메라를 사용할 수 없어 기본 화면을 표시합니다.</span><button type="button" onClick={() => { setStatus('starting'); setRetry((value) => value + 1) }}>다시 시도</button></div>}
   {debugOpen && createPortal(<aside id="vision-debug-panel" className="vision-debug-panel" role="region" aria-label="시점 판정 디버그">
-    <div className="vision-debug-heading"><strong>카메라 · 시점 판정</strong><button type="button" onClick={() => setDebugOpen(false)} aria-label="카메라 디버그 닫기">닫기</button></div>
+    <div className="vision-debug-heading"><strong>카메라 · 시점 판정</strong><button type="button" onClick={onDebugClose} aria-label="카메라 디버그 닫기">닫기</button></div>
     <div className="vision-debug-preview" style={{ aspectRatio: previewRatio }}>
       {previewStream && visible && <video ref={previewRef} muted playsInline autoPlay aria-label="실시간 카메라 미리보기" onLoadedMetadata={(event) => { const video = event.currentTarget; if (video.videoWidth && video.videoHeight) setPreviewRatio(`${video.videoWidth} / ${video.videoHeight}`) }} />}
       {previewStream && visible && debugFaces.map((face, index) => <span key={index} className={'vision-debug-face' + (face === activeFace ? ' active' : '')} style={{ left: `${(face.x - face.width / 2) * 100}%`, top: `${(face.y - face.height / 2) * 100}%`, width: `${face.width * 100}%`, height: `${face.height * 100}%` }} />)}
